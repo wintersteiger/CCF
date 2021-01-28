@@ -143,6 +143,8 @@ struct high_res_clock
 
     static time_point now();
 };
+#elif defined(OE_BUILD_ENCLAVE)
+  using high_res_clock = std::chrono::system_clock;
 #else
 using high_res_clock = std::chrono::high_resolution_clock;
 #endif

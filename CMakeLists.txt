@@ -501,11 +501,7 @@ if(BUILD_TESTS)
     SRCS src/crypto/test/digest_bench.cpp
     LINK_LIBS ccfcrypto.host secp256k1.host
   )
-  add_picobench(
-    signature_bench
-    SRCS src/crypto/test/signature_bench.cpp
-    LINK_LIBS ccfcrypto.host
-  )
+  include(${CMAKE_CURRENT_SOURCE_DIR}/src/crypto/test/signature_bench.cmake)
 
   # Storing signed governance operations
   add_e2e_test(
