@@ -473,6 +473,7 @@ if(BUILD_TESTS)
     SRCS src/tls/test/bench.cpp
     LINK_LIBS
   )
+  include(${CMAKE_CURRENT_SOURCE_DIR}/src/tls/test/bench_enclave.cmake)
   add_picobench(
     merkle_bench
     SRCS src/node/test/merkle_bench.cpp

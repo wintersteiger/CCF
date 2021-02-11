@@ -2,7 +2,12 @@
 // Licensed under the Apache 2.0 License.
 #include "../key_pair.h"
 
-#define PICOBENCH_IMPLEMENT_WITH_MAIN
+#ifdef OE_BUILD_ENCLAVE
+#include <tls_bench_t.h>
+#define PICOBENCH_IMPLEMENT
+#else
+#define PICOBENCH_IMPLEMENT_WITH_MAIN	#define PICOBENCH_IMPLEMENT_WITH_MAIN
+#endif
 #include <picobench/picobench.hpp>
 
 using namespace std;
@@ -98,13 +103,21 @@ static void benchmark_hash(picobench::state& s)
   s.stop_timer();
 }
 
-const std::vector<int> sizes = {10};
+
 
 using namespace tls;
 
-#define PICO_SUFFIX(CURVE) iterations(sizes).samples(10)
-
-#define PICO_HASH_SUFFIX() iterations(sizes).samples(10)
+#ifdef OE_BUILD_ENCLAVE
+const std::vector<int> sizes = {1000};
+#define PICO_SUFFIX(CURVE) iterations(sizes)
+const std::vector<int> hash_sizes = {10000};
+#define PICO_HASH_SUFFIX() iterations(hash_sizes)
+#else
+const std::vector<int> sizes = {10};
+#define PICO_SUFFIX(CURVE) iterations(sizes)
+const std::vector<int> hash_sizes = {10};
+#define PICO_HASH_SUFFIX() iterations(hash_sizes)
+#endif
 
 PICOBENCH_SUITE("sign secp384r1");
 namespace SIGN_SECP384R1
@@ -287,3 +300,40 @@ namespace Hashes
     benchmark_hash<OpenSSLHashProvider, MDType::SHA512, 102400>;
   PICOBENCH(sha_512_ossl_100k).PICO_HASH_SUFFIX();
 }
+
+#ifdef OE_BUILD_ENCLAVE
+int timespec_get(struct timespec*, int)
+{
+  return 0;
+}
+
+extern "C" int pthread_setaffinity_np(pthread_t, size_t, const cpu_set_t*)
+{
+  return 0;
+}
+
+extern "C" bool run_benchmark()
+{
+  bool r = false;
+  ENGINE_load_rdrand();
+  ENGINE* engine = ENGINE_by_id("rdrand");
+  ENGINE_init(engine);
+  ENGINE_set_default(engine, ENGINE_METHOD_RAND);
+
+  try {
+    picobench::runner runner;
+    runner.set_default_samples(1);
+    runner.run();
+    r = true;
+  }
+  catch (...) {
+    std::cout << "Caught exception" << std::endl;
+  }
+
+  ENGINE_finish(engine);
+  ENGINE_free(engine);
+  ENGINE_cleanup();
+
+  return true;
+}
+#endif
