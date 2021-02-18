@@ -2,6 +2,9 @@
 // Licensed under the Apache 2.0 License.
 #include "../key_pair.h"
 
+#include <openssl/evp.h>
+ #include <openssl/pem.h>
+
 #define PICOBENCH_IMPLEMENT_WITH_MAIN
 #include <picobench/picobench.hpp>
 
@@ -61,6 +64,38 @@ static void benchmark_sign(picobench::state& s)
   s.stop_timer();
 }
 
+template <size_t NContents>
+static void benchmark_sign_x25519(picobench::state& s)
+{
+  auto contents = make_contents<NContents>();
+
+  EVP_PKEY *pkey = NULL;
+  EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
+  EVP_PKEY_keygen_init(pctx);
+  EVP_PKEY_keygen(pctx, &pkey);
+  EVP_PKEY_CTX_free(pctx);
+
+  s.start_timer();
+  for (auto _ : s)
+  {
+    (void)_;
+
+    size_t sig_size = 0;
+
+    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
+    OPENSSL_CHECK1(EVP_DigestSignInit(md_ctx, NULL, NULL, NULL, pkey));
+    OPENSSL_CHECK1(EVP_DigestSign(md_ctx, NULL, &sig_size, contents.data(), contents.size()));
+    std::vector<uint8_t> sig(sig_size);
+    OPENSSL_CHECK1(EVP_DigestSign(md_ctx, sig.data(), &sig_size, contents.data(), contents.size()));
+    EVP_MD_CTX_free(md_ctx);
+
+    do_not_optimize(sig);
+    clobber_memory();
+  }
+  s.stop_timer();
+}
+
+
 template <typename T, typename S, CurveID CID, size_t NContents>
 static void benchmark_verify(picobench::state& s)
 {
@@ -76,6 +111,41 @@ static void benchmark_verify(picobench::state& s)
     (void)_;
     auto verified = pubk.verify(contents, signature);
     do_not_optimize(verified);
+    clobber_memory();
+  }
+  s.stop_timer();
+}
+
+template <size_t NContents>
+static void benchmark_verify_x25519(picobench::state& s)
+{
+  auto contents = make_contents<NContents>();
+
+  EVP_PKEY *pkey = NULL;
+  EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
+  EVP_PKEY_keygen_init(pctx);
+  EVP_PKEY_keygen(pctx, &pkey);
+  EVP_PKEY_CTX_free(pctx);
+
+  size_t sig_size = 0;
+  EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
+  OPENSSL_CHECK1(EVP_DigestSignInit(md_ctx, NULL, NULL, NULL, pkey));
+  OPENSSL_CHECK1(EVP_DigestSign(md_ctx, NULL, &sig_size, contents.data(), contents.size()));
+  std::vector<uint8_t> sig(sig_size);
+  OPENSSL_CHECK1(EVP_DigestSign(md_ctx, sig.data(), &sig_size, contents.data(), contents.size()));
+  EVP_MD_CTX_free(md_ctx);
+
+  s.start_timer();
+  for (auto _ : s)
+  {
+    (void)_;
+
+    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
+    OPENSSL_CHECK1(EVP_DigestVerifyInit(md_ctx, NULL, NULL, NULL, pkey));
+    OPENSSL_CHECK1(EVP_DigestVerify(md_ctx, sig.data(), sig_size, contents.data(), contents.size()));
+    EVP_MD_CTX_free(md_ctx);
+
+    do_not_optimize(sig);
     clobber_memory();
   }
   s.stop_timer();
@@ -156,6 +226,19 @@ namespace SIGN_SECP256R1
   PICOBENCH(sign_256r1_ossl_100k).PICO_SUFFIX(CurveID::SECP256R1);
 }
 
+PICOBENCH_SUITE("sign x25519");
+namespace SIGN_SECP256R1
+{
+  auto sign_x25519_ossl_1byte = benchmark_sign_x25519<1>;
+  PICOBENCH(sign_x25519_ossl_1byte).iterations(sizes).samples(10);
+
+  auto sign_x25519_ossl_1k = benchmark_sign_x25519<1024>;
+  PICOBENCH(sign_x25519_ossl_1k).iterations(sizes).samples(10);
+
+  auto sign_x25519_ossl_100k = benchmark_sign_x25519<102400>;
+  PICOBENCH(sign_x25519_ossl_100k).iterations(sizes).samples(10);
+}
+
 PICOBENCH_SUITE("verify secp384r1");
 namespace SECP384R1
 {
@@ -229,6 +312,20 @@ namespace SECP256R1
     102400>;
   PICOBENCH(verify_256r1_ossl_100k).PICO_SUFFIX(CurveID::SECP256R1);
 }
+
+PICOBENCH_SUITE("verift x25519");
+namespace SIGN_SECP256R1
+{
+  auto verify_x25519_ossl_1byte = benchmark_verify_x25519<1>;
+  PICOBENCH(verify_x25519_ossl_1byte).iterations(sizes).samples(10);
+
+  auto verify_x25519_ossl_1k = benchmark_verify_x25519<1024>;
+  PICOBENCH(verify_x25519_ossl_1k).iterations(sizes).samples(10);
+
+  auto verify_x25519_ossl_100k = benchmark_verify_x25519<102400>;
+  PICOBENCH(verify_x25519_ossl_100k).iterations(sizes).samples(10);
+}
+
 
 PICOBENCH_SUITE("hash");
 namespace Hashes
