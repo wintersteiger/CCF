@@ -7,6 +7,7 @@
 #include "ledger_secrets.h"
 #include "network_state.h"
 #include "tls/key_exchange.h"
+#include "tls/key_pair.h"
 
 #include <optional>
 
@@ -16,8 +17,8 @@ namespace ccf
   {
   private:
     static std::vector<uint8_t> encrypt_ledger_secret(
-      std::shared_ptr<crypto::KeyPair_mbedTLS> encryption_key,
-      std::shared_ptr<crypto::PublicKey_mbedTLS> backup_pubk,
+      crypto::KeyPairPtr encryption_key,
+      crypto::PublicKeyPtr backup_pubk,
       std::vector<uint8_t>&& plain)
     {
       // Encrypt secrets with a shared secret derived from backup public
@@ -39,7 +40,7 @@ namespace ccf
   public:
     static void broadcast_some(
       NetworkState& network,
-      std::shared_ptr<crypto::KeyPair_mbedTLS> encryption_key,
+      crypto::KeyPairPtr encryption_key,
       NodeId self,
       kv::Tx& tx,
       const LedgerSecretsMap& some_ledger_secrets)
@@ -61,8 +62,7 @@ namespace ccf
             {s.first,
              encrypt_ledger_secret(
                encryption_key,
-               std::make_shared<crypto::PublicKey_mbedTLS>(
-                 ni.encryption_pub_key),
+               crypto::make_public_key(ni.encryption_pub_key),
                std::move(s.second->raw_key)),
              s.second->previous_secret_stored_version});
         }
@@ -76,7 +76,7 @@ namespace ccf
 
     static void broadcast_new(
       NetworkState& network,
-      std::shared_ptr<crypto::KeyPair_mbedTLS> encryption_key,
+      crypto::KeyPairPtr encryption_key,
       kv::Tx& tx,
       LedgerSecretPtr&& new_ledger_secret)
     {
@@ -93,7 +93,7 @@ namespace ccf
           {std::nullopt,
            encrypt_ledger_secret(
              encryption_key,
-             std::make_shared<crypto::PublicKey_mbedTLS>(ni.encryption_pub_key),
+             crypto::make_public_key(ni.encryption_pub_key),
              std::move(new_ledger_secret->raw_key)),
            new_ledger_secret->previous_secret_stored_version});
 
@@ -105,7 +105,7 @@ namespace ccf
     }
 
     static std::vector<uint8_t> decrypt(
-      std::shared_ptr<crypto::KeyPair_mbedTLS> encryption_key,
+      crypto::KeyPairPtr encryption_key,
       std::shared_ptr<crypto::PublicKey_mbedTLS> primary_pubk,
       const std::vector<uint8_t>& cipher)
     {

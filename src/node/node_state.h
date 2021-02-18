@@ -119,8 +119,9 @@ namespace ccf
     static constexpr NodeId invalid_node_id = -1;
     NodeId self = invalid_node_id;
     crypto::KeyPairPtr node_sign_kp;
-    std::shared_ptr<crypto::KeyPair_mbedTLS> node_encrypt_kp;
+    tls::KeyPairPtr node_encrypt_kp;
     crypto::Pem node_cert;
+    tls::CurveID curve_id;
     QuoteInfo quote_info;
     CodeDigest node_code_id;
     CCFConfig config;
@@ -282,8 +283,9 @@ namespace ccf
       const CurveID& curve_id) :
       sm(State::uninitialized),
       self(INVALID_ID),
+
       node_sign_kp(crypto::make_key_pair(curve_id)),
-      node_encrypt_kp(std::make_shared<crypto::KeyPair_mbedTLS>(curve_id)),
+      node_encrypt_kp(crypto::make_key_pair(curve_id)),
       writer_factory(writer_factory),
       to_host(writer_factory.create_writer_to_outside()),
       network(network),

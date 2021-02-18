@@ -13,23 +13,28 @@
 
 namespace tls
 {
-  class KeyExchangeContext
+  class KeyExchangeContextBase
+  {
+  protected:
+    std::vector<uint8_t> own_public;
+
+  public:
+  };
+
+  class KeyExchangeContext_mbedTLS : public KeyExchangeContextBase
   {
   private:
     crypto::mbedtls::ECDHContext ctx = nullptr;
-    std::vector<uint8_t> own_public;
     crypto::EntropyPtr entropy;
-
-  public:
     static constexpr mbedtls_ecp_group_id domain_parameter =
       MBEDTLS_ECP_DP_SECP384R1;
-
     static constexpr size_t len_public = 1024 + 1;
     static constexpr size_t len_shared_secret = 1024;
 
-    KeyExchangeContext() :
+  public:
+    KeyExchangeContext_mbedTLS() :
       own_public(len_public),
-      entropy(crypto::create_entropy())
+      entropy(create_entropy())
     {
       auto tmp_ctx =
         crypto::mbedtls::make_unique<crypto::mbedtls::ECDHContext>();
@@ -60,7 +65,7 @@ namespace tls
       ctx = std::move(tmp_ctx);
     }
 
-    KeyExchangeContext(
+    KeyExchangeContext_mbedTLS(
       std::shared_ptr<crypto::KeyPair_mbedTLS> own_kp,
       std::shared_ptr<crypto::PublicKey_mbedTLS> peer_pubk) :
       entropy(crypto::create_entropy())
@@ -95,7 +100,7 @@ namespace tls
       ctx.reset();
     }
 
-    ~KeyExchangeContext()
+    ~KeyExchangeContext_mbedTLS()
     {
       free_ctx();
     }
@@ -139,4 +144,16 @@ namespace tls
       return shared_secret;
     }
   };
+
+  class KeyExchangeContext_OpenSSL : public KeyExchangeContextBase
+  {
+  public:
+  };
+
+#ifdef CRYPTO_PROVIDER_IS_MBEDTLS
+  using KeyExchangeContext = KeyExchangeContext_mbedTLS;
+#else
+  using KeyExchangeContext = KeyExchangeContext_OpenSSL;
+#endif
+
 }
