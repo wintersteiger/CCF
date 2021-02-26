@@ -2,12 +2,12 @@
 // Licensed under the Apache 2.0 License.
 #pragma once
 
+#include "crypto/key_pair.h"
 #include "crypto/symmetric_key.h"
 #include "genesis_gen.h"
 #include "ledger_secrets.h"
 #include "network_state.h"
 #include "tls/key_exchange.h"
-#include "tls/key_pair.h"
 
 #include <optional>
 
@@ -24,8 +24,8 @@ namespace ccf
       // Encrypt secrets with a shared secret derived from backup public
       // key
       auto backup_shared_secret = crypto::make_key_aes_gcm(
-        tls::KeyExchangeContext(encryption_key, backup_pubk)
-          .compute_shared_secret());
+        tls::make_key_exchange_context(encryption_key, backup_pubk)
+          ->compute_shared_secret());
 
       crypto::GcmCipher gcmcipher(plain.size());
       auto iv = crypto::create_entropy()->random(gcmcipher.hdr.get_iv().n);
@@ -114,8 +114,8 @@ namespace ccf
       std::vector<uint8_t> plain(gcmcipher.cipher.size());
 
       auto primary_shared_key = crypto::make_key_aes_gcm(
-        tls::KeyExchangeContext(encryption_key, primary_pubk)
-          .compute_shared_secret());
+        tls::make_key_exchange_context(encryption_key, primary_pubk)
+          ->compute_shared_secret());
 
       if (!primary_shared_key->decrypt(
             gcmcipher.hdr.get_iv(),

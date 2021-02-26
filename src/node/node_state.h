@@ -119,9 +119,9 @@ namespace ccf
     static constexpr NodeId invalid_node_id = -1;
     NodeId self = invalid_node_id;
     crypto::KeyPairPtr node_sign_kp;
-    tls::KeyPairPtr node_encrypt_kp;
+    crypto::KeyPairPtr node_encrypt_kp;
     crypto::Pem node_cert;
-    tls::CurveID curve_id;
+    crypto::CurveID curve_id;
     QuoteInfo quote_info;
     CodeDigest node_code_id;
     CCFConfig config;

@@ -4,6 +4,7 @@
 
 #include "crypto/entropy.h"
 #include "crypto/mbedtls/key_pair.h"
+#include "crypto/openssl/key_pair.h"
 #include "ds/logger.h"
 #include "tls/error_string.h"
 
@@ -16,9 +17,22 @@ namespace tls
   class KeyExchangeContextBase
   {
   protected:
+    static constexpr size_t len_public = 1024 + 1;
+    static constexpr size_t len_shared_secret = 1024;
+
     std::vector<uint8_t> own_public;
 
   public:
+    KeyExchangeContextBase() : own_public(len_public) {}
+    virtual ~KeyExchangeContextBase() = default;
+
+    std::vector<uint8_t> get_own_public()
+    {
+      // Note that this function returns a vector of bytes
+      // where the first byte represents the
+      // size of the public key
+      return own_public;
+    }
   };
 
   class KeyExchangeContext_mbedTLS : public KeyExchangeContextBase
@@ -28,13 +42,11 @@ namespace tls
     crypto::EntropyPtr entropy;
     static constexpr mbedtls_ecp_group_id domain_parameter =
       MBEDTLS_ECP_DP_SECP384R1;
-    static constexpr size_t len_public = 1024 + 1;
-    static constexpr size_t len_shared_secret = 1024;
 
   public:
     KeyExchangeContext_mbedTLS() :
-      own_public(len_public),
-      entropy(create_entropy())
+      KeyExchangeContextBase(),
+      entropy(crypto::create_entropy())
     {
       auto tmp_ctx =
         crypto::mbedtls::make_unique<crypto::mbedtls::ECDHContext>();
@@ -100,17 +112,9 @@ namespace tls
       ctx.reset();
     }
 
-    ~KeyExchangeContext_mbedTLS()
+    virtual ~KeyExchangeContext_mbedTLS()
     {
       free_ctx();
-    }
-
-    std::vector<uint8_t> get_own_public()
-    {
-      // Note that this function returns a vector of bytes
-      // where the first byte represents the
-      // size of the public key
-      return own_public;
     }
 
     void load_peer_public(const uint8_t* bytes, size_t size)
@@ -148,6 +152,15 @@ namespace tls
   class KeyExchangeContext_OpenSSL : public KeyExchangeContextBase
   {
   public:
+    KeyExchangeContext_OpenSSL() = default;
+
+    KeyExchangeContext_OpenSSL(
+      std::shared_ptr<crypto::KeyPair_OpenSSL> own_kp,
+      std::shared_ptr<crypto::PublicKey_OpenSSL> peer_pubk) :
+      KeyExchangeContextBase()
+    {}
+
+    virtual ~KeyExchangeContext_OpenSSL() = default;
   };
 
 #ifdef CRYPTO_PROVIDER_IS_MBEDTLS
@@ -156,4 +169,9 @@ namespace tls
   using KeyExchangeContext = KeyExchangeContext_OpenSSL;
 #endif
 
+  inline std::shared_ptr<KeyExchangeContext> make_key_exchange_context(
+    crypto::KeyPairPtr own_kp, crypto::PublicKeyPtr peer_pubk)
+  {
+    return std::make_shared<KeyExchangeContext>(own_kp, peer_pubk);
+  }
 }
