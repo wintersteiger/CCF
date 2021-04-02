@@ -121,11 +121,15 @@ const std::vector<int> sizes = {1000};
 #  define PICO_SUFFIX(CURVE) iterations(sizes)
 const std::vector<int> hash_sizes = {10000};
 #  define PICO_HASH_SUFFIX() iterations(hash_sizes)
+const std::vector<int> rsa_sizes = {100};
+#  define PICO_RSA_SUFFIX(CURVE) iterations(sizes)
 #else
 const std::vector<int> sizes = {10};
 #  define PICO_SUFFIX(CURVE) iterations(sizes)
 const std::vector<int> hash_sizes = {10};
 #  define PICO_HASH_SUFFIX() iterations(hash_sizes)
+const std::vector<int> rsa_sizes = {10};
+#  define PICO_RSA_SUFFIX(CURVE) iterations(sizes)
 #endif
 
 PICOBENCH_SUITE("sign secp384r1");
@@ -273,19 +277,19 @@ namespace SIGN_RSA2048
   }
 
   auto sign_rsa_ossl_1byte = benchmark_sign<RSAKeyPair_OpenSSL, 2048, 1>;
-  PICOBENCH(sign_rsa_ossl_1byte).PICO_SUFFIX();
+  PICOBENCH(sign_rsa_ossl_1byte).PICO_RSA_SUFFIX();
   auto sign_rsa_mbed_1byte = benchmark_sign<RSAKeyPair_mbedTLS, 2048, 1>;
-  PICOBENCH(sign_rsa_mbed_1byte).PICO_SUFFIX();
+  PICOBENCH(sign_rsa_mbed_1byte).PICO_RSA_SUFFIX();
 
   auto sign_rsa_ossl_1k = benchmark_sign<RSAKeyPair_OpenSSL, 2048, 1024>;
-  PICOBENCH(sign_rsa_ossl_1k).PICO_SUFFIX();
+  PICOBENCH(sign_rsa_ossl_1k).PICO_RSA_SUFFIX();
   auto sign_rsa_mbed_1k = benchmark_sign<RSAKeyPair_mbedTLS, 2048, 1024>;
-  PICOBENCH(sign_rsa_mbed_1k).PICO_SUFFIX();
+  PICOBENCH(sign_rsa_mbed_1k).PICO_RSA_SUFFIX();
 
   auto sign_rsa_ossl_100k = benchmark_sign<RSAKeyPair_OpenSSL, 2048, 102400>;
-  PICOBENCH(sign_rsa_ossl_100k).PICO_SUFFIX();
+  PICOBENCH(sign_rsa_ossl_100k).PICO_RSA_SUFFIX();
   auto sign_rsa_mbed_100k = benchmark_sign<RSAKeyPair_mbedTLS, 2048, 102400>;
-  PICOBENCH(sign_rsa_mbed_100k).PICO_SUFFIX();
+  PICOBENCH(sign_rsa_mbed_100k).PICO_RSA_SUFFIX();
 }
 
 PICOBENCH_SUITE("verify RSA-2048");
@@ -318,21 +322,21 @@ namespace VERIFY_RSA2048
   }
 
   auto verify_rsa_ossl_1byte = benchmark_verify<RSAKeyPair_OpenSSL, 2048, 1>;
-  PICOBENCH(verify_rsa_ossl_1byte).PICO_SUFFIX();
+  PICOBENCH(verify_rsa_ossl_1byte).PICO_RSA_SUFFIX();
   auto verify_rsa_mbed_1byte = benchmark_verify<RSAKeyPair_mbedTLS, 2048, 1>;
-  PICOBENCH(verify_rsa_mbed_1byte).PICO_SUFFIX();
+  PICOBENCH(verify_rsa_mbed_1byte).PICO_RSA_SUFFIX();
 
   auto verify_rsa_ossl_1k = benchmark_verify<RSAKeyPair_OpenSSL, 2048, 1024>;
-  PICOBENCH(verify_rsa_ossl_1k).PICO_SUFFIX();
+  PICOBENCH(verify_rsa_ossl_1k).PICO_RSA_SUFFIX();
   auto verify_rsa_mbed_1k = benchmark_verify<RSAKeyPair_mbedTLS, 2048, 1024>;
-  PICOBENCH(verify_rsa_mbed_1k).PICO_SUFFIX();
+  PICOBENCH(verify_rsa_mbed_1k).PICO_RSA_SUFFIX();
 
   auto verify_rsa_ossl_100k =
     benchmark_verify<RSAKeyPair_OpenSSL, 2048, 102400>;
-  PICOBENCH(verify_rsa_ossl_100k).PICO_SUFFIX();
+  PICOBENCH(verify_rsa_ossl_100k).PICO_RSA_SUFFIX();
   auto verify_rsa_mbed_100k =
     benchmark_verify<RSAKeyPair_mbedTLS, 2048, 102400>;
-  PICOBENCH(verify_rsa_mbed_100k).PICO_SUFFIX();
+  PICOBENCH(verify_rsa_mbed_100k).PICO_RSA_SUFFIX();
 }
 
 PICOBENCH_SUITE("hash");
