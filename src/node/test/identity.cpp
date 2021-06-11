@@ -1,341 +1,19 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
-#include "crypto/curve.h"
-
-#include <openssl/bn.h>
-#include <openssl/ec.h>
-#include <string>
-#include <vector>
+#include "node/byz_identity.h"
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
 using namespace crypto;
-
-namespace ByzIdent
-{
-  class Polynomial
-  {
-  public:
-    Polynomial(const Polynomial&) = delete;
-
-    Polynomial(
-      CurveID curve,
-      size_t t,
-      const std::vector<std::string>& coefficient_strings = {})
-    {
-      ctx = BN_CTX_new();
-
-      switch (curve)
-      {
-        case CurveID::SECP384R1:
-          group = EC_GROUP_new_by_curve_name(NID_secp384r1);
-          break;
-        case CurveID::SECP256R1:
-          group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
-          break;
-        default:
-          throw std::logic_error("unsupported curve");
-      }
-
-      group_order = BN_new();
-      EC_GROUP_get_order(group, group_order, ctx);
-
-      if (coefficient_strings.size() > 0)
-      {
-        for (size_t i = 0; i < coefficient_strings.size(); i++)
-        {
-          coefficients.push_back(BN_new());
-          BN_dec2bn(&coefficients[i], coefficient_strings[i].c_str());
-        }
-      }
-      else
-      {
-        for (size_t i = 0; i < t + 1; i++)
-        {
-          BIGNUM* x = BN_new();
-          BN_rand_range(x, group_order);
-          coefficients.push_back(x);
-        }
-      }
-    }
-
-    virtual ~Polynomial()
-    {
-      for (auto c : coefficients)
-      {
-        BN_free(c);
-      }
-      BN_free(group_order);
-      EC_GROUP_free(group);
-      BN_CTX_free(ctx);
-    }
-
-    BIGNUM* eval(BIGNUM* input) const
-    {
-      BIGNUM* result = BN_new();
-      BIGNUM *t1 = BN_new(), *t2 = BN_new();
-      for (size_t i = 0; i < coefficients.size(); i++)
-      {
-        BIGNUM* t0 = BN_new();
-        BN_set_word(t0, i);
-        BN_mod_exp(t1, input, t0, group_order, ctx);
-        BN_mod_mul(t2, coefficients[i], t1, group_order, ctx);
-        BN_mod_add(result, result, t2, group_order, ctx);
-        BN_free(t0);
-      }
-      BN_free(t2);
-      BN_free(t1);
-      return result;
-    }
-
-    static Polynomial* sample_rss(
-      CurveID curve, size_t t, size_t num_coefficients = 0)
-    {
-      Polynomial* r = new Polynomial(curve, t);
-
-      if (num_coefficients > t)
-      {
-        // really num_coefficients+1 or just num_coefficients?
-        for (size_t i = t + 1; i < num_coefficients + 1; i++)
-        {
-          BIGNUM* zero = BN_new();
-          BN_zero(zero);
-          r->coefficients.push_back(zero);
-        }
-      }
-
-      return r;
-    }
-
-    static Polynomial* sample_zss(
-      CurveID curve, size_t t, BIGNUM* coeff0 = nullptr)
-    {
-      assert(t > 0);
-      Polynomial* r = new Polynomial(curve, t - 1);
-      if (!coeff0)
-      {
-        coeff0 = BN_new();
-        BN_zero(coeff0);
-      }
-      r->coefficients.insert(r->coefficients.begin(), coeff0);
-      return r;
-    }
-
-    std::vector<BIGNUM*> coefficients;
-
-    std::string to_string()
-    {
-      std::stringstream r;
-      r << "[";
-      bool first = true;
-      for (const auto& c : coefficients)
-      {
-        if (first)
-        {
-          first = false;
-        }
-        else
-        {
-          r << ", ";
-        }
-        char* cs = BN_bn2dec(c);
-        r << cs;
-        OPENSSL_free(cs);
-      }
-      r << "]";
-      return r.str();
-    }
-
-  protected:
-    BN_CTX* ctx;
-    EC_GROUP* group;
-    BIGNUM* group_order;
-  };
-
-  struct Share : std::vector<BIGNUM*> {};
-
-  class Deal
-  {
-  public:
-    Deal(const std::vector<Polynomial*>& sharings = {}) : sharings(sharings) {}
-    virtual ~Deal() {}
-
-  protected:
-    std::vector<Polynomial*> sharings;
-  };
-
-  class SigningDeal : public Deal
-  {
-  public:
-    SigningDeal(
-      size_t t,
-      const std::vector<size_t>& indices,
-      bool defensive = false,
-      CurveID curve = CurveID::SECP384R1) :
-      Deal(), curve(curve), t(t), indices_(indices)
-    {
-      sample(t, defensive);
-      compute_shares();
-
-      if (defensive)
-      {
-        // commits = [ compress(commit.multi(2, deal.coefficients(u))) for u in
-        // range(2*t+1) ] c0 = deal.coefficients(0) non_zero_shares = c0[0:2] +
-        // [ c0[4] ] proof = zkp.prove_zeroes(commits[0], non_zero_shares),
-        // zkp.prove_456(commits[t+1:2*t+1], deal.higher_coefficients(t))
-      }
-    }
-
-    virtual ~SigningDeal()
-    {
-      for (auto p : sharings)
-      {
-        delete p;
-      }
-      delete_shares();
-    }
-
-    void load(const std::vector<std::vector<std::string>>& ss)
-    {
-      for (auto p : sharings)
-      {
-        delete p;
-      }
-      sharings.clear();
-      for (const std::vector<std::string>& s : ss)
-      {
-        sharings.push_back(new Polynomial(curve, t, s));
-      }
-      compute_shares();
-    }
-
-    const Polynomial* k() const
-    {
-      return sharings[0];
-    }
-    const Polynomial* a() const
-    {
-      return sharings[1];
-    }
-    const Polynomial* z() const
-    {
-      return sharings[2];
-    }
-    const Polynomial* y() const
-    {
-      return sharings[3];
-    }
-    const Polynomial* w() const
-    {
-      return sharings[4];
-    }
-
-    std::vector<Share> shares()
-    {
-      return shares_;
-    }
-    std::vector<uint8_t> commits()
-    {
-      return commits_;
-    }
-    std::vector<uint8_t> proof()
-    {
-      return proof_;
-    }
-
-    std::string to_string() const
-    {
-      std::stringstream r;
-      r << "sharings={";
-      bool first = true;
-      for (const auto& s : sharings)
-      {
-        if (first)
-          first = false;
-        else
-          r << ", ";
-        r << s->to_string() << std::endl;
-      }
-      r << "}";
-      r << std::endl;
-      r << "shares={";
-      first = true;
-      for (const auto& s : shares_)
-      {
-        if (first)
-          first = false;
-        else
-          r << ", ";
-        BIGNUM* tmp = BN_new();
-        for (const auto& p : s)
-        {
-          char *ps = BN_bn2dec(p);
-          r << ps;
-          OPENSSL_free(ps);
-        }
-        BN_free(tmp);
-      }
-      r << "}";
-      return r.str();
-    }
-
-  protected:
-    CurveID curve;
-    size_t t;
-    std::vector<size_t> indices_;
-    std::vector<Share> shares_;
-    std::vector<uint8_t> commits_, proof_;
-
-    void sample(int64_t t, bool defensive = false)
-    {
-      sharings.push_back(Polynomial::sample_rss(curve, t, 2 * t));
-      sharings.push_back(Polynomial::sample_rss(curve, t, 2 * t));
-      sharings.push_back(Polynomial::sample_zss(curve, 2 * t));
-      sharings.push_back(Polynomial::sample_zss(curve, 2 * t));
-      sharings.push_back(
-        defensive ? Polynomial::sample_rss(curve, 2 * t) : nullptr);
-    }
-
-    void delete_shares()
-    {
-      for (auto& share : shares_)
-      {
-        for (BIGNUM *bn : share)
-        {
-          BN_free(bn);
-        }
-      }
-      shares_.clear();
-    }
-
-    void compute_shares()
-    {
-      delete_shares();
-      for (auto index : indices_)
-      {
-        BIGNUM* input = BN_new();
-        BN_set_word(input, index);
-        shares_.resize(shares_.size()+1);
-        for (auto s : sharings)
-        {
-          shares_.back().push_back(s->eval(input));
-        }
-        BN_free(input);
-      }
-    }
-  };
-
-}
-
-using namespace ByzIdent;
+using namespace ByzIdentity;
 
 TEST_CASE("Debug signing deal")
 {
   size_t t = 2;
   std::vector<size_t> indices = {2, 5, 7};
-  SigningDeal deal(t, indices, true);
+  SigningDeal deal(t, indices, false);
 
   // clang-format off
   deal.load({
@@ -385,21 +63,23 @@ TEST_CASE("Debug signing deal")
     };
   // clang-format on
 
-  const auto &ss = deal.shares();
+  const auto& ss = deal.shares();
   REQUIRE(ss.size() == expected_shares.size());
-  for (size_t i=0; i < ss.size(); i++) {
-    for (size_t j=0; j < ss[i].size(); j++) {
-      char *val = BN_bn2dec(ss[i][j]);
+  for (size_t i = 0; i < ss.size(); i++)
+  {
+    for (size_t j = 0; j < ss[i].size(); j++)
+    {
+      char* val = BN_bn2dec(ss[i][j]);
       REQUIRE(strcmp(val, expected_shares[i][j]) == 0);
       OPENSSL_free(val);
     }
   }
 }
 
-TEST_CASE("Establish Byzantine identity of 3-node network")
+TEST_CASE("Establish Byzantine identity of 4-node network")
 {
   size_t t = 2;
-  bool defensive = true;
-  std::vector<size_t> indices = {2, 5, 7};
+  bool defensive = false;
+  std::vector<size_t> indices = {2, 5, 7, 9};
   SigningDeal deal(t, indices, defensive);
 }
