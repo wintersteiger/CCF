@@ -11,6 +11,8 @@ using namespace ByzIdentity;
 
 TEST_CASE("Debug signing deal")
 {
+  ByzIdentity::init_bases();
+
   size_t t = 2;
   std::vector<size_t> indices = {2, 5, 7};
   SigningDeal deal(t, indices, false);
@@ -69,17 +71,19 @@ TEST_CASE("Debug signing deal")
   {
     for (size_t j = 0; j < ss[i].size(); j++)
     {
-      char* val = BN_bn2dec(ss[i][j]);
-      REQUIRE(strcmp(val, expected_shares[i][j]) == 0);
-      OPENSSL_free(val);
+      REQUIRE(*ss[i][j] == BigNum(expected_shares[i][j]));
     }
   }
+
+  ByzIdentity::clear_bases();
 }
 
 TEST_CASE("Establish Byzantine identity of 4-node network")
 {
+  ByzIdentity::init_bases();
   size_t t = 2;
   bool defensive = false;
   std::vector<size_t> indices = {2, 5, 7, 9};
   SigningDeal deal(t, indices, defensive);
+  ByzIdentity::clear_bases();
 }
