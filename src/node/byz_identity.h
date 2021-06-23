@@ -5,6 +5,7 @@
 #include "crypto/curve.h"
 #include "crypto/openssl/openssl_wrappers.h"
 
+#include <map>
 #include <memory>
 #include <openssl/bn.h>
 #include <openssl/ec.h>
@@ -79,7 +80,7 @@ namespace ByzIdentity
       CHECKNULL(b = BN_dup(other.b));
     }
 
-    bool operator==(const BigNum& other)
+    bool operator==(const BigNum& other) const
     {
       return BN_cmp(b, other.b) == 0;
     }
@@ -212,6 +213,23 @@ namespace ByzIdentity
         BN_free(b);
       }
 
+      Point(
+        const std::vector<uint8_t>& buf,
+        crypto::CurveID curve = crypto::CurveID::SECP384R1)
+      {
+        group = get_openssl_group(curve);
+        CHECKNULL(p = EC_POINT_new(group));
+        CHECKNULL(bn_ctx = BN_CTX_new());
+        EC_POINT_oct2point(group, p, buf.data(), buf.size(), bn_ctx);
+      }
+
+      Point(const Point& other)
+      {
+        CHECKNULL(group = EC_GROUP_dup(other.group));
+        CHECKNULL(p = EC_POINT_dup(other.p, group));
+        CHECKNULL(bn_ctx = BN_CTX_new());
+      }
+
       virtual ~Point()
       {
         BN_CTX_free(bn_ctx);
@@ -219,26 +237,54 @@ namespace ByzIdentity
         EC_POINT_free(p);
       }
 
-      Point mul(const BigNum& b)
+      Point& operator=(const Point& other)
+      {
+        BN_CTX_free(bn_ctx);
+        EC_GROUP_free(group);
+        EC_POINT_free(p);
+        CHECKNULL(group = EC_GROUP_dup(other.group));
+        CHECKNULL(p = EC_POINT_dup(other.p, group));
+        CHECKNULL(bn_ctx = BN_CTX_new());
+        return *this;
+      }
+
+      bool operator==(const Point& other) const
+      {
+        return EC_POINT_cmp(group, p, other.p, bn_ctx);
+      }
+
+      Point mul(const BigNum& b) const
       {
         Point r;
         CHECK1(EC_POINT_mul(group, r.p, NULL, this->p, b.b, bn_ctx));
         return r;
       }
 
-      Point add(const Point& p)
+      Point add(const Point& p) const
       {
         Point r;
         CHECK1(EC_POINT_add(group, r.p, this->p, p.p, bn_ctx));
         return r;
       }
 
-      std::vector<uint8_t> to_buf()
+      std::vector<uint8_t> compress() const
       {
-        unsigned char* buf = nullptr;
-        size_t n = EC_POINT_point2buf(
-          group, p, POINT_CONVERSION_COMPRESSED, &buf, bn_ctx);
-        std::vector<uint8_t> r = {buf, buf + n};
+        int sz = EC_POINT_point2oct(
+          group, p, POINT_CONVERSION_COMPRESSED, NULL, 0, bn_ctx);
+        std::vector<uint8_t> r(sz);
+        if (
+          EC_POINT_point2oct(
+            group, p, POINT_CONVERSION_COMPRESSED, r.data(), sz, bn_ctx) == 0)
+          throw std::runtime_error("could not compress point into buffer");
+        return r;
+      }
+
+      std::string to_compressed_hex() const
+      {
+        char* buf =
+          EC_POINT_point2hex(group, p, POINT_CONVERSION_COMPRESSED, bn_ctx);
+        std::string r = buf;
+        OPENSSL_free(buf);
         return r;
       }
 
@@ -476,43 +522,32 @@ namespace ByzIdentity
     }
   }
 
-  static void clear_bases()
-  {
-    for (auto& [n, v] : bases)
-    {
-      for (std::shared_ptr<EC::Point> p : v)
-      {
-        p.reset();
-      }
-    }
-  }
-
   EC::Point commit_multi(
     size_t start,
     const std::vector<std::shared_ptr<BigNum>>& msgs,
     crypto::CurveID curve = crypto::CurveID::SECP384R1)
   {
+    init_bases();
     auto basis = bases[curve];
     assert(
       0 <= start and start + msgs.size() < basis.size() and msgs.size() > 0);
     EC::Point r = basis[start]->mul(*msgs[0]);
     for (size_t i = 1; i < msgs.size(); i++)
     {
-      EC::Point bi_mul_mi = basis[start + i]->mul(*msgs[i]);
-      r = r.add(bi_mul_mi);
+      r = r.add(basis[start + i]->mul(*msgs[i]));
     }
     return r;
   }
 
-  std::vector<uint8_t> compress(
+  inline std::vector<uint8_t> compress(
     size_t start,
     const std::vector<std::shared_ptr<BigNum>>& msgs,
     crypto::CurveID curve = crypto::CurveID::SECP384R1)
   {
-    return commit_multi(start, msgs, curve).to_buf();
+    return commit_multi(start, msgs, curve).compress();
   }
 
-  std::vector<uint8_t> compress_x_wx(
+  inline std::vector<uint8_t> compress_x_wx(
     std::shared_ptr<BigNum> x,
     std::shared_ptr<BigNum> wx,
     crypto::CurveID curve = crypto::CurveID::SECP384R1)
@@ -521,8 +556,30 @@ namespace ByzIdentity
   }
 
   typedef std::vector<std::shared_ptr<BigNum>> Share;
+  typedef std::vector<std::vector<uint8_t>> Commitment;
+  class Deal
+  {
+  public:
+    Deal(crypto::CurveID curve = crypto::CurveID::SECP384R1) : curve(curve) {}
+    virtual ~Deal() {}
 
-  class SigningDeal
+    const std::vector<Share>& shares()
+    {
+      return shares_;
+    }
+
+    const std::vector<Commitment>& commitments()
+    {
+      return commitments_;
+    }
+
+  protected:
+    crypto::CurveID curve;
+    std::vector<Share> shares_;
+    std::vector<Commitment> commitments_;
+  };
+
+  class SigningDeal : public Deal
   {
   public:
     SigningDeal(
@@ -530,7 +587,7 @@ namespace ByzIdentity
       const std::vector<size_t>& indices,
       bool defensive = false,
       crypto::CurveID curve = crypto::CurveID::SECP384R1) :
-      curve(curve),
+      Deal(curve),
       t(t),
       defensive(defensive),
       indices_(indices)
@@ -540,10 +597,8 @@ namespace ByzIdentity
 
       if (defensive)
       {
-        // commits = [ compress(commit.multi(2, deal.coefficients(u))) for u in
-        // range(2*t+1) ] c0 = deal.coefficients(0) non_zero_shares = c0[0:2] +
-        // [ c0[4] ] proof = zkp.prove_zeroes(commits[0], non_zero_shares),
-        // zkp.prove_456(commits[t+1:2*t+1], deal.higher_coefficients(t))
+        compute_commits();
+        compute_proof();
       }
     }
 
@@ -557,38 +612,38 @@ namespace ByzIdentity
         sharings.push_back(std::make_shared<Polynomial>(t, s, curve));
       }
       compute_shares();
+      if (defensive)
+      {
+        compute_commits();
+      }
     }
 
     const std::shared_ptr<Polynomial>& k() const
     {
       return sharings[0];
     }
+
     const std::shared_ptr<Polynomial>& a() const
     {
       return sharings[1];
     }
+
     const std::shared_ptr<Polynomial>& z() const
     {
       return sharings[2];
     }
+
     const std::shared_ptr<Polynomial>& y() const
     {
       return sharings[3];
     }
+
     const std::shared_ptr<Polynomial>& w() const
     {
       return sharings[4];
     }
 
-    std::vector<Share> shares()
-    {
-      return shares_;
-    }
-    std::vector<uint8_t> commits()
-    {
-      return commits_;
-    }
-    std::vector<uint8_t> proof()
+    std::vector<std::string> proof()
     {
       return proof_;
     }
@@ -626,12 +681,10 @@ namespace ByzIdentity
     }
 
   protected:
-    crypto::CurveID curve;
     size_t t;
     bool defensive;
     std::vector<size_t> indices_;
-    std::vector<Share> shares_;
-    std::vector<uint8_t> commits_, proof_;
+    std::vector<std::string> proof_;
     std::vector<std::shared_ptr<Polynomial>> sharings;
 
     void sample()
@@ -660,58 +713,65 @@ namespace ByzIdentity
         }
       }
     }
+
+    void compute_commits()
+    {
+      commitments_.clear();
+      for (size_t i = 0; i < 2 * t + 1; i++)
+      {
+        std::vector<std::shared_ptr<BigNum>> sc_i;
+        for (auto s : sharings)
+        {
+          sc_i.push_back(s->coefficients[i]);
+        }
+        commitments_.push_back({commit_multi(2, sc_i).compress()});
+      }
+    }
+
+    void compute_proof()
+    {
+      // TODO
+    }
   };
 
-  class SamplingDeal
+  class ResharingDeal : public Deal
   {
   public:
-    SamplingDeal(
+    ResharingDeal(
       const std::vector<size_t>& indices,
-      bool defensive = false,
+      const std::vector<size_t>& next_indices,
       crypto::CurveID curve = crypto::CurveID::SECP384R1) :
-      curve(curve),
-      defensive(defensive),
-      indices_(indices)
+      Deal(curve),
+      indices_(indices),
+      next_indices_(next_indices)
     {
-      group = get_openssl_group(curve);
-      t = (indices.size() - 1) / 3;
       sample();
       compute_shares();
+      compute_commits();
     }
 
-    virtual ~SamplingDeal() {}
-
-    std::vector<Share> shares()
-    {
-      return shares_;
-    }
-
-    std::vector<std::vector<uint8_t>> commits()
-    {
-      return commits_;
-    }
+    virtual ~ResharingDeal() {}
 
   protected:
-    crypto::CurveID curve;
-    size_t t;
-    bool defensive;
-    EC_GROUP* group;
-    std::vector<size_t> indices_;
-    std::vector<Share> shares_;
-    std::vector<std::vector<uint8_t>> commits_;
+    std::vector<size_t> indices_, next_indices_;
     std::vector<std::shared_ptr<BivariatePolynomial>> sharings;
 
-    void sample()
+    virtual void sample()
     {
+      auto t0 = (indices_.size() - 1) / 3;
+      auto t1 = (next_indices_.size() - 1) / 3;
+
       sharings.clear();
-      auto r = BivariatePolynomial::sample_rss(t, t);
-      auto r_witness = BivariatePolynomial::sample_rss(t, t);
-      sharings.push_back(r);
-      sharings.push_back(r_witness);
+      auto q = BivariatePolynomial::sample_zss(t0, t1);
+      auto q_witness = BivariatePolynomial::sample_zss(t0, t1);
+      sharings.push_back(q);
+      sharings.push_back(q_witness);
     }
 
     void compute_shares()
     {
+      if (sharings.size() != 2)
+        throw std::logic_error("missing sharings");
       auto q = sharings[0];
       auto q_witness = sharings[1];
       for (auto i : indices_)
@@ -724,23 +784,179 @@ namespace ByzIdentity
       }
     }
 
-    void commit_coefficients()
+    void compute_commits()
     {
       auto q = sharings[0];
       auto q_witness = sharings[1];
       size_t degree_y = q->coefficients.size();
       size_t degree_x = q->coefficients[0].size();
-      commits_.clear();
+      commitments_.clear();
       for (size_t i = 0; i < degree_y; i++)
       {
         auto qv = q->coefficients[i];
         auto qv_witness = q_witness->coefficients[i];
-        std::vector<uint8_t> c;
+        std::vector<std::vector<uint8_t>> c;
         for (size_t j = 0; j < degree_x; j++)
         {
-          c = compress_x_wx(qv[j], qv_witness[j], curve);
+          c.push_back(compress_x_wx(qv[j], qv_witness[j], curve));
         }
-        commits_.push_back(c);
+        commitments_.push_back(c);
+      }
+    }
+  };
+
+  class SamplingDeal : public ResharingDeal
+  {
+  public:
+    SamplingDeal(
+      const std::vector<size_t>& indices,
+      bool defensive = false,
+      crypto::CurveID curve = crypto::CurveID::SECP384R1) :
+      ResharingDeal(indices, indices, curve)
+    {
+      sample();
+      compute_shares();
+      compute_commits();
+    }
+
+    virtual ~SamplingDeal() {}
+
+  protected:
+    virtual void sample() override
+    {
+      size_t t0 = (indices_.size() - 1) / 3;
+      sharings.clear();
+      auto r = BivariatePolynomial::sample_rss(t0, t0);
+      auto r_witness = BivariatePolynomial::sample_rss(t0, t0);
+      sharings.push_back(r);
+      sharings.push_back(r_witness);
+    }
+  };
+
+  class Session
+  {
+  public:
+    Session(size_t id) : id(id) {}
+    ~Session() {}
+
+    size_t id;
+    std::string subprotocol;
+    std::map<ccf::NodeId, std::shared_ptr<Deal>> deals;
+    std::map<ccf::NodeId, std::map<ccf::NodeId, std::vector<uint8_t>>>
+      encrypted_shares;
+  };
+
+  class SamplingSession : public Session
+  {
+  public:
+    using Session::deals;
+
+    SamplingSession(size_t id) : Session(id) {}
+    virtual ~SamplingSession() {}
+
+    std::vector<Commitment> batched_commits;
+
+    void batch_commits()
+    {
+      batched_commits.clear();
+
+      if (deals.size() == 0)
+        throw std::logic_error("no deals");
+
+      std::vector<std::vector<Commitment>> commits;
+
+      size_t y_dim = deals.size();
+      size_t x_dim = 0;
+      for (const auto& [_, d] : deals)
+      {
+        auto& cs = d->commitments();
+        assert(cs.size() > 0);
+        assert(x_dim == 0 || x_dim == cs[0].size());
+        x_dim = cs[0].size();
+        commits.push_back(cs);
+      }
+
+      assert(x_dim != 0);
+
+      for (size_t y = 0; y < y_dim; y++)
+      {
+        std::vector<std::vector<uint8_t>> xt;
+        for (size_t x = 0; x < x_dim; x++)
+        {
+          EC::Point p(crypto::CurveID::SECP384R1);
+          for (auto ci : commits)
+          {
+            assert(ci.size() > x);
+            assert(ci[0].size() > y);
+            auto c = ci[y][x];
+            p.add(EC::Point(c));
+          }
+          xt.push_back(p.compress());
+        }
+        batched_commits.push_back(xt);
+      }
+    }
+
+    std::vector<std::vector<std::shared_ptr<BigNum>>> sum_shares()
+    {
+      if (deals.size() == 0)
+        throw std::logic_error("no deals");
+
+      std::vector<Share> summed_polynomials;
+      auto& deal0 = deals.begin()->second;
+      size_t num_poly = deal0->shares().size();
+      std::vector<std::vector<std::shared_ptr<BigNum>>> r;
+      for (size_t i = 0; i < num_poly; i++)
+      {
+        std::vector<std::shared_ptr<BigNum>> jt;
+        for (size_t j = 0; j < deal0->shares()[i].size(); j++)
+        {
+          auto s = BigNum::Zero();
+          for (auto& [_, d] : deals)
+          {
+            s->add(*(*d).shares()[i][j]);
+          }
+          jt.push_back(s);
+        }
+        r.push_back(jt);
+      }
+      return r;
+    }
+
+    EC::Point eval_in_exp(const Commitment& commitment, size_t j)
+    {
+      size_t degree = commitment.size();
+      EC::Point result(commitment[0]);
+
+      for (size_t i = 1; i < degree; i++)
+      {
+        result.add(EC::Point(commitment[i]).mul(std::pow(j, i)));
+      }
+
+      return result;
+    }
+
+    void verify_shares(
+      size_t node_index,
+      const std::vector<std::vector<std::shared_ptr<BigNum>>>&
+        share_polynomials,
+      const std::vector<Commitment>& commits)
+    {
+      size_t degree_y = commits.size();
+      size_t degree_x = commits[0].size();
+      auto shares = share_polynomials[0];
+      auto witnesses = share_polynomials[1];
+
+      for (size_t i = 0; i < degree_y; i++)
+      {
+        // Recompute commitment from received shares and check that they match.
+        auto commits_i = commits[i];
+        EC::Point computed = eval_in_exp(commits_i, node_index);
+        auto received = compress_x_wx(shares[i], witnesses[i]);
+        if (computed.compress() != received)
+        {
+          throw std::logic_error("shares do not correspond to commitments");
+        }
       }
     }
   };
