@@ -41,8 +41,8 @@ namespace ccf
     crypto::Pem encryption_pub_key;
     /// Node status
     NodeStatus status = NodeStatus::PENDING;
-    /// Flag to track whether a node has caught up with the network.
-    bool ready_for_promotion = false;
+    /// The configuration in which a node was added.
+    uint64_t configuration_id;
 
     /** Set to the seqno of the latest ledger secret at the time the node is
         trusted */
