@@ -143,6 +143,7 @@ namespace aft
     // Configurations
     std::list<Configuration> configurations;
     std::unordered_map<ccf::NodeId, NodeState> nodes;
+    std::unordered_set<ccf::NodeId> learners;
 
     // Index at which this node observes its retirement
     std::optional<ccf::SeqNo> retirement_idx = std::nullopt;
@@ -460,7 +461,10 @@ namespace aft
       return state->view_history.initialise(term_history);
     }
 
-    void add_configuration(Index idx, const Configuration::Nodes& conf)
+    void add_configuration(
+      Index idx,
+      const Configuration::Nodes& conf,
+      const std::unordered_set<ccf::NodeId>& learners_ = {})
     {
       std::unique_lock<std::mutex> guard(state->lock, std::defer_lock);
       // It is safe to call is_follower() by construction as the consensus
@@ -507,8 +511,12 @@ namespace aft
         }
       }
       configurations.push_back({idx, std::move(conf), offset});
+      for (auto id : learners_)
+      {
+        learners.insert(learners_);
+      }
       backup_nodes.clear();
-      create_and_remove_node_state();
+      create_and_remove_node_state(idx);
     }
 
     Configuration::Nodes get_latest_configuration_unsafe() const
@@ -2807,7 +2815,7 @@ namespace aft
 
       if (changed)
       {
-        create_and_remove_node_state();
+        create_and_remove_node_state(idx);
       }
     }
 
@@ -2871,7 +2879,7 @@ namespace aft
 
       if (changed)
       {
-        create_and_remove_node_state();
+        create_and_remove_node_state(idx);
       }
 
       if (consensus_type == ConsensusType::BFT)
@@ -2881,8 +2889,31 @@ namespace aft
       }
     }
 
-    void create_and_remove_node_state()
+    void create_and_remove_node_state(ccf::SeqNo cfg_seq_no)
     {
+      if (replica_state == kv::ReplicaState::Learner)
+      {
+        if (
+          learners.find(state->my_node_id) != learners.end() &&
+          nodes.find(state->my_node_id) != nodes.end() &&
+          state->commit_idx >= cfg_seq_no)
+        {
+          LOG_INFO_FMT("Configurations: ready for promotion");
+          auto msg = std::make_unique<threading::Tmsg<AsyncPromoteNodeMsg>>(
+            promote_node_cb,
+            state->my_node_id,
+            rpc_map,
+            node_sign_kp,
+            node_cert);
+
+          threading::ThreadMessaging::thread_messaging.add_task(
+            threading::ThreadMessaging::get_execution_thread(
+              threading::MAIN_THREAD_ID),
+            std::move(msg));
+        }
+        return;
+      }
+
       // Find all nodes present in any active configuration.
       Configuration::Nodes active_nodes;
 
