@@ -38,6 +38,7 @@
 #include "node/request_tracker.h"
 #include "node/rpc/tx_status.h"
 #include "node/signatures.h"
+#include "orc.h"
 #include "raft_types.h"
 
 #include <algorithm>
@@ -146,6 +147,11 @@ namespace aft
     std::unordered_map<ccf::NodeId, NodeState> nodes;
     std::unordered_map<ccf::NodeId, ccf::SeqNo> learners;
     bool use_two_tx_reconfig = false;
+    std::shared_ptr<aft::RPCRequestContext> rpc_request_context;
+    std::unordered_map<kv::ReconfigurationId, kv::NetworkConfiguration>
+      network_configurations;
+    std::unordered_map<kv::ReconfigurationId, std::unordered_set<NodeId>>
+      orc_sets;
 
     // Index at which this node observes its retirement
     std::optional<ccf::SeqNo> retirement_idx = std::nullopt;
@@ -192,6 +198,7 @@ namespace aft
       std::shared_ptr<Executor> executor_,
       std::shared_ptr<aft::RequestTracker> request_tracker_,
       std::unique_ptr<aft::ViewChangeTracker> view_change_tracker_,
+      std::shared_ptr<aft::RPCRequestContext> rpc_request_context_,
       std::chrono::milliseconds request_timeout_,
       std::chrono::milliseconds election_timeout_,
       std::chrono::milliseconds view_change_timeout_,
@@ -213,7 +220,9 @@ namespace aft
       request_timeout(request_timeout_),
       election_timeout(election_timeout_),
       view_change_timeout(view_change_timeout_),
+
       sig_tx_interval(sig_tx_interval_),
+      rpc_request_context(rpc_request_context_),
       public_only(public_only_),
 
       distrib(0, (int)election_timeout_.count() / 2),
@@ -488,17 +497,34 @@ namespace aft
       return state->view_history.initialise(term_history);
     }
 
+  private:
+    uint32_t get_bft_offset(const Configuration::Nodes& conf) const
+    {
+      uint32_t offset = 0;
+      if (consensus_type == ConsensusType::BFT && !configurations.empty())
+      {
+        auto progress_tracker = store->get_progress_tracker();
+        auto target = progress_tracker->get_primary_at_last_view_change();
+        for (; offset < configurations.back().nodes.size(); ++offset)
+        {
+          if (
+            get_primary_at_config(std::get<1>(target), offset, conf) ==
+            std::get<0>(target))
+          {
+            break;
+          }
+        }
+      }
+      return offset;
+    }
+
+  public:
     void add_configuration(
       Index idx,
-      const Configuration::Nodes& conf,
+      const kv::Configuration::Nodes& conf,
       const std::unordered_set<ccf::NodeId>& new_learners = {})
     {
-      std::unordered_set<ccf::NodeId> conf_ids;
-      for (const auto& [id, _] : conf)
-      {
-        conf_ids.insert(id);
-      }
-      LOG_DEBUG_FMT("Configurations: add {{{}}}", fmt::join(conf_ids, ", "));
+      LOG_DEBUG_FMT("Configurations: add {{{}}}", conf);
 
       std::unique_lock<std::mutex> guard(state->lock, std::defer_lock);
       // It is safe to call is_follower() by construction as the consensus
@@ -509,8 +535,48 @@ namespace aft
         guard.lock();
       }
 
-      if (!use_two_tx_reconfig)
+      if (use_two_tx_reconfig)
       {
+        for (auto& [nid, info] : conf)
+        {
+          if (nid != state->my_node_id)
+          {
+            LOG_DEBUG_FMT(
+              "Configurations: update node information for {}", nid);
+            auto nit = nodes.find(nid);
+            if (nit == nodes.end())
+            {
+              nodes[nid] = NodeState(info, state->last_idx + 1, 0);
+            }
+            else
+            {
+              nit->second.node_info = info;
+            }
+          }
+        }
+
+        if (!new_learners.empty())
+        {
+          LOG_DEBUG_FMT(
+            "Configurations: new learners: {{{}}}",
+            fmt::join(new_learners, ", "));
+          for (auto& id : new_learners)
+          {
+            if (learners.find(id) == learners.end())
+            {
+              learners[id] = idx;
+            }
+          }
+        }
+      }
+      else
+      {
+        if (!new_learners.empty())
+        {
+          throw std::runtime_error(
+            "learner requires two-transaction reconfiguration");
+        }
+
         // Detect when we are retired by observing a configuration
         // from which we are absent following a configuration in which
         // we were included. Note that this relies on retirement being
@@ -528,53 +594,17 @@ namespace aft
           retirement_idx = idx;
           LOG_INFO_FMT("Node retiring at {}", idx);
         }
-      }
 
-      uint32_t offset = 0;
-      if (consensus_type == ConsensusType::BFT && !configurations.empty())
-      {
-        auto progress_tracker = store->get_progress_tracker();
-        auto target = progress_tracker->get_primary_at_last_view_change();
-        for (; offset < configurations.back().nodes.size(); ++offset)
-        {
-          if (
-            get_primary_at_config(std::get<1>(target), offset, conf) ==
-            std::get<0>(target))
-          {
-            break;
-          }
-        }
+        uint32_t offset = get_bft_offset(conf);
+        configurations.push_back({idx, std::move(conf), offset, 0});
+        backup_nodes.clear();
+        create_and_remove_node_state();
       }
-      configurations.push_back({idx, std::move(conf), offset});
-      if (use_two_tx_reconfig)
-      {
-        if (!new_learners.empty())
-        {
-          LOG_DEBUG_FMT(
-            "Configurations: new learners: {{{}}}",
-            fmt::join(new_learners, ", "));
-          for (auto& id : new_learners)
-          {
-            if (learners.find(id) == learners.end())
-            {
-              learners[id] = idx;
-            }
-          }
-        }
-      }
-      else if (!new_learners.empty())
-      {
-        throw std::runtime_error(
-          "learner requires two-transaction reconfiguration");
-      }
-      backup_nodes.clear();
-      create_and_remove_node_state();
     }
 
-    void add_network_configuration(
-      ccf::SeqNo seqno, const kv::NetworkConfiguration& config)
+    void reconfigure(ccf::SeqNo seqno, const kv::NetworkConfiguration& config)
     {
-      LOG_DEBUG_FMT("Configurations: new network config: {{{}}}", config);
+      LOG_DEBUG_FMT("Configurations: reconfigure to {{{}}}", config);
       std::unique_lock<std::mutex> guard(state->lock, std::defer_lock);
 
       if (is_bft_reexecution() && threading::ThreadMessaging::thread_count > 1)
@@ -585,12 +615,57 @@ namespace aft
       // Hooks may be reordered, so the node info in `configurations` and
       // `nodes` may not be available yet.
 
-      if (
-        use_two_tx_reconfig && !is_learner() && !is_retired() &&
-        config.nodes.find(state->my_node_id) != config.nodes.end())
+      network_configurations[config.rid] = config;
+      orc_sets[config.rid] = {};
+
+      Configuration::Nodes conf_nodes;
+      for (const auto& nid : config.nodes)
       {
-        // Send/schedule ORCs
+        if (nid == state->my_node_id)
+        {
+          conf_nodes[nid] = {};
+        }
+        else
+        {
+          auto iit = nodes.find(nid);
+          assert(iit != nodes.end());
+          conf_nodes[nid] = iit->second.node_info;
+        }
       }
+      uint32_t offset = get_bft_offset(conf_nodes);
+      configurations.push_back(
+        {seqno, std::move(conf_nodes), offset, config.rid});
+
+      backup_nodes.clear();
+      create_and_remove_node_state();
+    }
+
+    bool orc(kv::ReconfigurationId rid, const NodeId& node_id)
+    {
+      LOG_DEBUG_FMT(
+        "Configurations: ORC for configuration #{} from {}", rid, node_id);
+
+      auto oit = orc_sets.find(rid);
+      auto ncit = network_configurations.find(rid);
+
+      if (oit == orc_sets.end() || ncit == network_configurations.end())
+      {
+        return false;
+      }
+
+      const auto& ncnodes = ncit->second.nodes;
+      if (ncnodes.find(node_id) == ncnodes.end())
+      {
+        return false;
+      }
+
+      oit->second.insert(node_id);
+      LOG_DEBUG_FMT(
+        "Configurations: have {} ORCs out of {} for configuration #{}",
+        oit->second.size(),
+        ncnodes.size(),
+        rid);
+      return oit->second.size() >= get_quorum(ncnodes.size());
     }
 
     Configuration::Nodes get_latest_configuration_unsafe() const
@@ -1160,7 +1235,7 @@ namespace aft
     }
 
     ccf::NodeId get_primary_at_config(
-      ccf::View view, uint32_t offset, const Configuration::Nodes& conf)
+      ccf::View view, uint32_t offset, const Configuration::Nodes& conf) const
     {
       CCF_ASSERT_FMT(
         consensus_type == ConsensusType::BFT,
@@ -2824,13 +2899,13 @@ namespace aft
 
         // Need 50% + 1 of the total nodes in the current config (including us).
         votes_for_me.insert(from);
-        quorum = get_quorum(cfg);
+        quorum = get_quorum(cfg.nodes.size());
       }
       else
       {
         // Need 50% + 1 of the total nodes, which are the other nodes plus us.
         votes_for_me.insert(from);
-        quorum = ((nodes.size() + 1) / 2) + 1;
+        quorum = get_quorum(nodes.size() + 1);
       }
 
       if (votes_for_me.size() >= quorum)
@@ -2958,14 +3033,14 @@ namespace aft
       return r;
     }
 
-    size_t get_quorum(const kv::Configuration& c) const
+    size_t get_quorum(size_t n) const
     {
       switch (consensus_type)
       {
         case CFT:
-          return (c.nodes.size() / 2) + 1;
+          return (n / 2) + 1;
         case BFT:
-          return (c.nodes.size() / 3) + 1;
+          return (n / 3) + 1;
         default:
           return -1;
       }
@@ -2973,7 +3048,7 @@ namespace aft
 
     bool have_quorum(size_t n, const kv::Configuration& c) const
     {
-      return n >= get_quorum(c);
+      return n >= get_quorum(c.nodes.size());
     }
 
     bool enough_trusted(const kv::Configuration& c) const
@@ -3042,17 +3117,6 @@ namespace aft
         }
         else
         {
-          if (is_primary())
-          {
-            if (!enough_trusted(*next))
-            {
-              LOG_TRACE_FMT(
-                "Configurations: not enough trusted nodes for next "
-                "configuration");
-              break;
-            }
-          }
-
           if (num_trusted(*next) == next->nodes.size())
           {
             LOG_TRACE_FMT(
@@ -3069,10 +3133,44 @@ namespace aft
               }
             }
 
+            for (auto& [nid, _] : next->nodes)
+            {
+              learners.erase(nid);
+            }
+
+            if (
+              is_learner() &&
+              next->nodes.find(state->my_node_id) != next->nodes.end())
+            {
+              LOG_INFO_FMT(
+                "Becoming follower {}: {}",
+                state->my_node_id,
+                state->current_view);
+              replica_state = kv::ReplicaState::Follower;
+            }
+
             configurations.pop_front();
           }
           else
           {
+            LOG_TRACE_FMT(
+              "Configurations: not enough trusted nodes for configuration #{}; "
+              "submitting ORC",
+              next->rid);
+
+            if (
+              use_two_tx_reconfig && !is_learner() && !is_retired() &&
+              rpc_request_context &&
+              next->nodes.find(state->my_node_id) != next->nodes.end())
+            {
+              auto msg = std::make_unique<threading::Tmsg<AsyncORCTaskMsg>>(
+                orc_cb, rpc_request_context, state->my_node_id, next->rid);
+
+              threading::ThreadMessaging::thread_messaging.add_task(
+                threading::ThreadMessaging::get_execution_thread(
+                  threading::MAIN_THREAD_ID),
+                std::move(msg));
+            }
             break;
           }
         }
@@ -3179,32 +3277,6 @@ namespace aft
 
     void create_and_remove_node_state()
     {
-      if (use_two_tx_reconfig && is_learner())
-      {
-        for (auto& cfg : configurations)
-        {
-          if (cfg.idx > state->commit_idx)
-            break;
-
-          if (
-            cfg.nodes.find(state->my_node_id) != cfg.nodes.end() &&
-            learners.find(state->my_node_id) != learners.end())
-          {
-            LOG_INFO_FMT("Configurations: ready for promotion");
-            // Submit promotion RPC here.
-            learners.erase(state->my_node_id);
-
-            // The transition to follower will happen when the reconfiguration
-            // transaction commits.
-            LOG_INFO_FMT(
-              "Becoming follower {}: {}",
-              state->my_node_id,
-              state->current_view);
-            replica_state = kv::ReplicaState::Follower;
-          }
-        }
-      }
-
       // Find all nodes present in any active configuration.
       Configuration::Nodes active_nodes;
 
@@ -3242,8 +3314,13 @@ namespace aft
           continue;
         }
 
-        if (nodes.find(node_info.first) == nodes.end())
+        if (
+          nodes.find(node_info.first) == nodes.end() ||
+          !channels->have_channel(node_info.first))
         {
+          LOG_DEBUG_FMT(
+            "Configurations: create node channel with {}", node_info.first);
+
           // A new node is sent only future entries initially. If it does not
           // have prior data, it will communicate that back to the leader.
           auto index = state->last_idx + 1;
