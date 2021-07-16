@@ -1,12 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
-#include "crypto/entropy.h"
-#include "crypto/symmetric_key.h"
 #include "kv/kv_types.h"
 #include "node/byz_identity.h"
-
-#include <ccf/entity_id.h>
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -79,73 +75,203 @@ TEST_CASE("Debug signing deal")
   }
 }
 
-std::map<size_t, std::map<size_t, std::shared_ptr<crypto::KeyAesGcm>>>
-make_node_keys(const std::vector<size_t>& indices)
+TEST_CASE("Compute signature")
 {
-  size_t max_index = 0;
+  const char* message_to_sign = "Hello";
+  size_t t = 1;
 
-  for (auto i : indices)
-  {
-    max_index = std::max(max_index, i);
-  }
+  auto group_order = EC::group_order();
+  auto x = BigNum::Random(*group_order);
 
+  // bypassing Byzantine sampling of the private signing key.
+  auto xp = Polynomial::sample_zss(t, x);
+  // auto x_commits = [ (commit.basis[0] * xp.coefficients[u]).compress() for u
+  // in range(t+1) ];
+
+  // sharing_indices = [ j + 1 for j in range(2*t+1) ]
+
+  // # (1) DEALING: deals is a list of (shares, commits, proof) triples
+  // # we skip the elaboration/encryption of DEAL messages to carry it
+  // # and their allocation to a signining session
+  // deals = [ SigningDeal.deal(t, sharing_indices, defensive=defensive) for i
+  // in range(t+1)] commits = None if defensive:
+  //     # normally re-computed by every replica
+  //     dealer_commits = [ deals[i][1] for i in range(t+1) ]
+  //     commits = [ batch_commit(dealer_commits,u) for u in range(2*t+1) ]
+
+  // # (2) After accepting the deals, every replica aggregates their shares
+  // # and sends their OpenK message.
+  // def core_session(j):
+  //     session = SignSession()
+  //     session.defensive = defensive
+  //     session.shares = sum_shares([ deals[i][0][j] for i in range(t+1) ])
+  //     session.batched_commits = commits
+  //     if defensive:
+  //         verify_shares_signing(j+1,session.shares,commits)
+  //     return session
+  // session = [ core_session(j) for j in range(2*t+1) ]
+  // openKs = [ compute_OpenK(session[j]) for j in range(2*t+1) ]
+
+  // K_shares = [ openKs[j][0] for j in range(2*t+1)]
+  // if defensive:
+  //     # normally verified by every replica
+  //     # note the defensive protocol only need t+1 verified messages
+  //     for j in range(2*t+1):
+  //         Cx = K_shares[j]
+  //         Cj = compute_C_at_j(commits,j+1)
+  //         proof = openKs[j][1]
+  //         assert zkp.verify_OpenK((Cx,Cj), proof)
+
+  // # (3) After receiving the OpenKs, every replica computes r, then their
+  // shares of the signature # Only this last "online" step of signing depends
+  // on the message and shared private key
+
+  // K = interpolate_and_check(K_shares, sharing_indices, t)
+  // r = int((Point.decompress(K).x) % order)
+  // for j in range(2*t+1):
+  //     session[j].txt = txt
+  //     session[j].r = r
+  // # sig_shares is a list of (ak_share, s_share, proof)
+  // sig_shares = [ compute_signature_shares_core(session[j], xp.eval(j+1), 0)
+  // for j in range(2*t+1) ]
+
+  // # (4) Anyone can then aggregate the shares and interpolate the signature
+  // ak_shares = [ sig_shares[j][0] for j in range(2*t+1)]
+  // s_shares = [ sig_shares[j][1] for j in range(2*t+1)]
+
+  // if defensive:
+  //     for j in range(2*t+1):
+  //         m = int(crypto_provider.hash_msg(session[j].txt))
+  //         Cy_pv = compress(
+  //             Point.decompress(compute_C_at_j(x_commits, j+1)) +
+  //             Point.decompress(compute_C_at_j(session[j].batched_commits,
+  //             j+1)))
+  //         proof = sig_shares[j][2]
+  //         assert zkp.verify_mult(Cy_pv,m,session[j].r,ak_shares[j],
+  //         s_shares[j], proof)
+  // # these 5 lines should be factored out of keying
+  // ak = lagrange_interpolate(ak_shares, sharing_indices, 0)
+  // s1 = lagrange_interpolate(s_shares, sharing_indices, 0)
+  // s = (s1 * inv(ak)) % order
+  // signature = encode_dss_signature(session[0].r, s)
+
+  // # check signing succeeded using another, plain ECDSA implementation
+  // # (the call to verify may fail with an InvalidSignature exception)
+  // # crypto_provider.ecdsa_verify(X, signature, message_to_sign)
+  // // VK verification key is the public part of `x`
+  // VK.verify(signature, bytes(txt, "utf-8"), ec.ECDSA(hashes.SHA256()))
+}
+
+std::map<ccf::NodeId, std::map<ccf::NodeId, std::shared_ptr<crypto::KeyAesGcm>>>
+make_node_keys(const std::vector<ccf::NodeId>& nids)
+{
   EntropyPtr entropy = create_entropy();
-  std::map<size_t, std::map<size_t, std::shared_ptr<crypto::KeyAesGcm>>> r;
-  for (size_t i = 0; i < max_index; i++)
+  std::
+    map<ccf::NodeId, std::map<ccf::NodeId, std::shared_ptr<crypto::KeyAesGcm>>>
+      r;
+  for (auto nid_from : nids)
   {
-    for (size_t j = 0; j < max_index; j++)
+    for (auto nid_to : nids)
     {
-      r[i][j] = crypto::make_key_aes_gcm(entropy->random(32));
+      if (nid_from != nid_to)
+      {
+        r[nid_from][nid_to] = crypto::make_key_aes_gcm(entropy->random(32));
+      }
     }
   }
   return r;
 }
 
-TEST_CASE("Establish Byzantine identity of 4-node network")
+TEST_CASE("Establish Byzantine identity")
 {
   size_t t = 4;
-  bool defensive = false;
-  std::vector<size_t> all_indices = {
-    2, 5, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18};
-  SamplingSession s(0);
-  std::vector<ccf::NodeId> nids;
-  std::vector<size_t> indices;
 
+  std::vector<ccf::NodeId> nids;
+  for (size_t i = 0; i < 3 * t + 1; i++)
+  {
+    nids.push_back(ccf::NodeId(std::to_string(i)));
+  }
+
+  SamplingSession s(0, t, nids, false);
+
+  auto keys = make_node_keys(nids);
+
+  for (size_t i = 0; i < 3 * t + 1; i++)
+  {
+    s.nodes.push_back({nids[i], s.indices[i], keys});
+  }
+
+  // Prepare t+1 deals
   for (size_t i = 0; i < t + 1; i++)
   {
-    nids.push_back(ccf::NodeId(std::to_string(all_indices[i])));
-    indices.push_back(all_indices[i]);
+    s.nodes[i].deal = std::make_shared<SamplingDeal>(s.indices);
   }
 
-  // Nodes prepare deals
-  for (auto& id : nids)
+  // Dealers encrypt shares for each other node
+  for (size_t i = 0; i < t + 1; i++)
   {
-    // Note: need all_indices or just indices?
-    s.deals[id] = std::make_shared<SamplingDeal>(all_indices, defensive);
+    s.nodes[i].encrypt_shares(nids, s.all_encrypted_shares);
   }
 
-  // Nodes encrypt shares for each other node
-  auto node_keys = make_node_keys(indices);
-  for (size_t i = 0; i < indices.size(); i++)
+  // Nodes decrypt all shares
+  for (auto& n : s.nodes)
   {
-    for (size_t j = 0; j < indices.size(); j++)
+    n.decrypt_shares(nids, s.all_encrypted_shares);
+  }
+
+  for (auto& from : s.nodes)
+  {
+    if (from.deal)
     {
-      if (i != j)
+      auto plain = from.deal->serialise();
+
+      for (auto& to : s.nodes)
       {
-        auto plain = s.deals[nids[i]]->shares();
-        // TODO: serialize shares
-        std::vector<uint8_t> plain_bytes;
-        std::vector<uint8_t> cipher(plain_bytes.size());
-        node_keys[i][j]->encrypt({}, plain_bytes, {}, cipher.data(), {});
-        s.encrypted_shares[nids[i]][nids[j]] = cipher;
+        if (from.nid != to.nid)
+        {
+          REQUIRE(plain == to.decrypted_shares[from.nid]);
+        }
       }
     }
   }
 
-  s.batch_commits();
-  auto sum = s.sum_shares();
-  for (auto i : indices)
+  // All nodes validate the shares (sum_shares_reshare) and reply with
+  // "reshares" for each node (evaluations of the sharing/witness polynomials at
+  // each sharing index; this includes all 3*t+1 nodes). All reshares are also
+  // encrypted by the node-to-node keys.
+
+  for (auto& node : s.nodes)
   {
-    s.verify_shares(i, sum, s.batched_commits);
+    node.batch_commits(s); // Only primary, shared in start message?
+
+    // Sum shares and verify them.
+    auto sum = node.sum_polynomials(s);
+    try
+    {
+      node.verify_shares(sum, node.batched_commits);
+    }
+    catch (std::exception& ex)
+    {
+      // --> Blame
+    }
+
+    s.resharings[node.nid] = node.compute_resharing(s, sum);
+    // encryption of resharings NYI
+  }
+
+  for (auto& node : s.nodes)
+  {
+    for (auto& id : nids)
+    {
+      auto srid = s.resharings[id];
+      node.add_reshare(s, id, srid);
+
+      if (node.reshares.size() >= 2 * t + 1)
+      {
+        node.compute_x_wx_shares(s);
+        // send OpenKey
+        break;
+      }
+    }
   }
 }
