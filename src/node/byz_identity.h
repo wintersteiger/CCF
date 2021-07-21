@@ -107,6 +107,16 @@ namespace ByzIdentity
       return BN_cmp(b, other.b) == 0;
     }
 
+    bool operator!=(const BigNum& other) const
+    {
+      return BN_cmp(b, other.b) != 0;
+    }
+
+    bool operator<(const BigNum& other) const
+    {
+      return BN_cmp(b, other.b) < 0;
+    }
+
     static std::shared_ptr<BigNum> Random(const BigNum& order)
     {
       std::shared_ptr<BigNum> r = std::make_shared<BigNum>();
@@ -231,11 +241,15 @@ namespace ByzIdentity
       BigNum r((unsigned long)0);
       for (size_t i = 0; i < shares.size(); i++)
       {
-        {
-          auto coeff_i = lagrange_coefficient(indices, i, j, group_order);
-          auto t = BigNum::mod_mul(coeff_i, *shares[i], group_order);
-          r = BigNum::mod_add(r, t, group_order);
-        }
+        auto coeff_i = lagrange_coefficient(indices, i, j, group_order);
+        auto t = BigNum::mod_mul(coeff_i, *shares[i], group_order);
+        r = BigNum::mod_add(r, t, group_order);
+        // LOG_DEBUG_FMT(
+        //   "r={} t={} coeff_i={} *shares[i]={}",
+        //   r.to_string(),
+        //   t.to_string(),
+        //   coeff_i.to_string(),
+        //   shares[i]->to_string());
       }
       return r;
     }
@@ -403,6 +417,30 @@ namespace ByzIdentity
       EC_POINT* p;
       EC_GROUP* group;
     };
+
+    EC::Point eval_in_exp(
+      const std::vector<CompressedPoint>& commitment,
+      size_t j,
+      std::shared_ptr<BigNum> group_order)
+    {
+      size_t degree = commitment.size();
+      assert(degree > 0);
+
+      // LOG_TRACE_FMT("c[0]={}", ds::to_hex(commitment[0]));
+      EC::Point result(commitment[0]);
+      // LOG_TRACE_FMT("result={}", result.to_compressed_hex());
+      for (size_t i = 1; i < degree; i++)
+      {
+        auto t = BigNum::mod_exp(BigNum(j), BigNum(i), *group_order);
+        // LOG_TRACE_FMT("t={}", t.to_string());
+        // LOG_TRACE_FMT("c[i]={}", ds::to_hex(commitment[i]));
+        EC::Point c(commitment[i]);
+        // LOG_TRACE_FMT("c={}", c.to_compressed_hex());
+        result = result.add(c.mul(t));
+        // LOG_TRACE_FMT("result={}", result.to_compressed_hex());
+      }
+      return result;
+    }
   }
 
   class Polynomial
@@ -431,26 +469,15 @@ namespace ByzIdentity
     }
 
     Polynomial(
-      size_t t,
-      const std::vector<std::string>& coefficient_strings = {},
+      const std::vector<std::string>& coefficient_strings,
       crypto::CurveID curve = crypto::CurveID::SECP384R1)
     {
       group_order = EC::group_order(curve);
 
-      if (coefficient_strings.size() > 0)
+      for (size_t i = 0; i < coefficient_strings.size(); i++)
       {
-        for (size_t i = 0; i < coefficient_strings.size(); i++)
-        {
-          coefficients.push_back(
-            std::make_shared<BigNum>(coefficient_strings[i]));
-        }
-      }
-      else
-      {
-        for (size_t i = 0; i < t + 1; i++)
-        {
-          coefficients.push_back(BigNum::Random(*group_order));
-        }
+        coefficients.push_back(
+          std::make_shared<BigNum>(coefficient_strings[i]));
       }
     }
 
@@ -498,18 +525,21 @@ namespace ByzIdentity
       size_t num_coefficients = 0,
       crypto::CurveID curve = crypto::CurveID::SECP384R1)
     {
-      std::shared_ptr<Polynomial> r = std::make_shared<Polynomial>(t, curve);
+      std::vector<std::shared_ptr<BigNum>> coefficients;
+      auto go = EC::group_order(curve);
 
-      if (num_coefficients > t)
+      for (size_t i = 0; i < t + 1; i++)
       {
-        // really num_coefficients+1 or just num_coefficients?
-        for (size_t i = t + 1; i < num_coefficients + 1; i++)
-        {
-          r->coefficients.push_back(BigNum::Zero());
-        }
+        coefficients.push_back(BigNum::Random(*go));
       }
 
-      return r;
+      // really num_coefficients+1 or just num_coefficients?
+      for (size_t i = t + 1; i < num_coefficients + 1; i++)
+      {
+        coefficients.push_back(BigNum::Random(*go));
+      }
+
+      return std::make_shared<Polynomial>(std::move(coefficients));
     }
 
     static std::shared_ptr<Polynomial> sample_zss(
@@ -554,10 +584,18 @@ namespace ByzIdentity
       for (auto& c : coefficients)
       {
         auto b = c->serialise();
-        auto sz = serialise_size(b.size());
-        r.insert(r.end(), sz.begin(), sz.end());
         r.insert(r.end(), b.begin(), b.end());
       }
+
+      // const uint8_t* data = r.data();
+      // size_t size = r.size();
+      // Polynomial check(data, size);
+      // assert(check.coefficients.size() == coefficients.size());
+      // for (size_t i = 0; i < coefficients.size(); i++)
+      // {
+      //   assert(*check.coefficients[i] == *coefficients[i]);
+      // }
+
       return r;
     }
 
@@ -609,14 +647,16 @@ namespace ByzIdentity
       crypto::CurveID curve = crypto::CurveID::SECP384R1)
     {
       auto r = std::make_shared<BivariatePolynomial>(curve);
+      auto go = EC::group_order(curve);
 
       for (size_t i = 0; i < degree_y + 1; i++)
       {
-        r->coefficients.push_back({});
+        std::vector<std::shared_ptr<BigNum>> t;
         for (size_t j = 0; j < degree_x + 1; j++)
         {
-          r->coefficients.back().push_back(std::make_shared<BigNum>());
+          t.push_back(BigNum::Random(*go));
         }
+        r->coefficients.push_back(t);
       }
 
       return r;
@@ -648,8 +688,7 @@ namespace ByzIdentity
       return r;
     }
 
-    std::vector<std::shared_ptr<BigNum>> y_coefficients(
-      const std::shared_ptr<BigNum>& x)
+    Polynomial y_coefficients(const std::shared_ptr<BigNum>& x)
     {
       std::vector<std::shared_ptr<BigNum>> r;
 
@@ -658,7 +697,44 @@ namespace ByzIdentity
         r.push_back(Polynomial::eval(coefficients[i], x, curve, group_order));
       }
 
-      return r;
+      return Polynomial(r);
+    }
+
+    std::string to_string() const
+    {
+      std::stringstream r;
+      r << "[";
+      bool first_cc = true;
+      for (const auto& cc : coefficients)
+      {
+        if (first_cc)
+        {
+          first_cc = false;
+        }
+        else
+        {
+          r << ", ";
+        }
+
+        r << "[";
+        bool first_c = true;
+        for (const auto& c : cc)
+        {
+          if (first_c)
+          {
+            first_c = false;
+          }
+          else
+          {
+            r << ", ";
+          }
+
+          r << c->to_string();
+        }
+        r << "]";
+      }
+      r << "]";
+      return r.str();
     }
 
     std::vector<uint8_t> serialise() const
@@ -773,7 +849,46 @@ namespace ByzIdentity
       r.insert(r.end(), rw.begin(), rw.end());
       return r;
     }
+
+    std::string to_string() const
+    {
+      std::stringstream ss;
+      ss << "[" << q.to_string() << ", " << q_witness.to_string() << "]";
+      return ss.str();
+    }
   };
+
+  std::vector<std::vector<std::shared_ptr<BigNum>>> sum_share_polys(
+    const std::vector<SharePolynomials>& deals,
+    std::shared_ptr<BigNum> group_order)
+  {
+    assert(deals.size() > 0);
+    std::vector<std::vector<std::shared_ptr<BigNum>>> r;
+
+    for (size_t p = 0; p < 2; p++)
+    {
+      std::vector<std::shared_ptr<BigNum>> jt;
+
+      const auto& poly0 = p == 0 ? deals[0].q : deals[0].q_witness;
+      for (size_t u = 0; u < poly0.coefficients.size(); u++)
+      {
+        auto sum = BigNum::Zero();
+        LOG_DEBUG_FMT("sum={}", sum->to_string());
+        for (size_t k = 0; k < deals.size(); k++)
+        {
+          const auto& poly_k = p == 0 ? deals[k].q : deals[k].q_witness;
+          auto& c = poly_k.coefficients[u];
+          LOG_DEBUG_FMT("+c={}", c->to_string());
+          *sum = BigNum::mod_add(*sum, *c, *group_order);
+          LOG_DEBUG_FMT("sum={}", sum->to_string());
+        }
+        jt.push_back(sum);
+      }
+      r.push_back(jt);
+    }
+
+    return r;
+  }
 
   class Deal
   {
@@ -828,6 +943,8 @@ namespace ByzIdentity
         }
         shares_.push_back(t);
       }
+
+      // TODO: load commitments
     }
 
     virtual ~SigningDeal() {}
@@ -837,7 +954,7 @@ namespace ByzIdentity
       sharings.clear();
       for (const std::vector<std::string>& s : ss)
       {
-        sharings.push_back(std::make_shared<Polynomial>(t, s, curve));
+        sharings.push_back(std::make_shared<Polynomial>(s, curve));
       }
       compute_shares();
       if (defensive)
@@ -938,14 +1055,11 @@ namespace ByzIdentity
       std::vector<uint8_t> rc = serialise_size(commitments_.size());
       for (auto& c : commitments_)
       {
+        std::vector<uint8_t> rcsz = serialise_size(c.size());
+        rc.insert(rc.end(), rcsz.begin(), rcsz.end());
         rc.insert(rc.end(), c.begin(), c.end());
       }
       r.insert(r.end(), rc.begin(), rc.end());
-
-      const uint8_t* buf = r.data();
-      size_t sz = r.size();
-      SigningDeal check(buf, sz);
-      assert(check.shares_.size() == shares_.size());
       return r;
     }
 
@@ -976,12 +1090,12 @@ namespace ByzIdentity
       for (auto index : indices_)
       {
         auto input = std::make_shared<BigNum>(index);
-        shares_.resize(shares_.size() + 1);
+        std::vector<std::shared_ptr<BigNum>> t;
         for (auto s : sharings)
         {
-          shares_.back().push_back(
-            Polynomial::eval(s->coefficients, input, curve));
+          t.push_back(Polynomial::eval(s->coefficients, input, curve));
         }
+        shares_.push_back(t);
       }
     }
 
@@ -1011,12 +1125,16 @@ namespace ByzIdentity
     ResharingDeal(
       const std::vector<size_t>& indices,
       const std::vector<size_t>& next_indices,
-      crypto::CurveID curve = crypto::CurveID::SECP384R1) :
+      crypto::CurveID curve = crypto::CurveID::SECP384R1,
+      bool init = true) :
       Deal(false, curve)
     {
-      sample(indices, next_indices);
-      compute_share_polynomials(indices);
-      compute_commits();
+      if (init)
+      {
+        sample(indices, next_indices);
+        compute_share_polynomials(indices);
+        compute_commits();
+      }
     }
 
     ResharingDeal(
@@ -1028,46 +1146,54 @@ namespace ByzIdentity
       size_t n = serialized::read<size_t>(buf, sz);
       for (size_t i = 0; i < n; i++)
       {
-        sharings.push_back(std::make_shared<BivariatePolynomial>(buf, sz));
+        share_polynomials.push_back(SharePolynomials(buf, sz));
       }
 
       n = serialized::read<size_t>(buf, sz);
       for (size_t i = 0; i < n; i++)
       {
-        share_polynomials.push_back(SharePolynomials(buf, sz));
+        size_t m = serialized::read<size_t>(buf, sz);
+        std::vector<std::vector<uint8_t>> cs;
+        for (size_t j = 0; j < m; j++)
+        {
+          size_t vs = serialized::read<size_t>(buf, sz);
+          cs.push_back(std::vector<uint8_t>(buf, buf + vs));
+          assert(cs.back().size() == vs);
+          buf += vs;
+          sz -= vs;
+        }
+        commitments_.push_back(cs);
       }
-
-      compute_commits();
     }
 
     virtual ~ResharingDeal() {}
 
     virtual std::vector<uint8_t> serialise() const
     {
-      std::vector<uint8_t> r = serialise_size(sharings.size());
-      for (auto& poly : sharings)
-      {
-        auto b = poly->serialise();
-        r.insert(r.end(), b.begin(), b.end());
-      }
-
-      std::vector<uint8_t> rs = serialise_size(share_polynomials.size());
+      std::vector<uint8_t> r = serialise_size(share_polynomials.size());
       for (auto& share : share_polynomials)
       {
         auto b = share.q.serialise();
-        rs.insert(rs.end(), b.begin(), b.end());
+        r.insert(r.end(), b.begin(), b.end());
         b = share.q_witness.serialise();
-        rs.insert(rs.end(), b.begin(), b.end());
+        r.insert(r.end(), b.begin(), b.end());
       }
 
-      r.insert(r.end(), rs.begin(), rs.end());
+      auto num_commitments = serialise_size(commitments_.size());
+      r.insert(r.end(), num_commitments.begin(), num_commitments.end());
 
-      const uint8_t* b = r.data();
-      size_t sz = r.size();
-      ResharingDeal check(b, sz);
-      assert(check.shares().size() == shares().size());
-      assert(check.sharings.size() == sharings.size());
-      assert(check.commitments().size() == commitments().size());
+      for (auto& commit : commitments_)
+      {
+        auto commit_size = serialise_size(commit.size());
+        r.insert(r.end(), commit_size.begin(), commit_size.end());
+        for (auto& c : commit)
+        {
+          auto c_size = serialise_size(c.size());
+          r.insert(r.end(), c_size.begin(), c_size.end());
+          r.insert(r.end(), c.begin(), c.end());
+        }
+      }
+
       return r;
     }
 
@@ -1099,19 +1225,33 @@ namespace ByzIdentity
       auto q_witness = BivariatePolynomial::sample_zss(t0, t1);
       sharings.push_back(q);
       sharings.push_back(q_witness);
+
+      LOG_TRACE_FMT(
+        "BYID: resharing deal sharings q={} q_witness={}",
+        q->to_string(),
+        q_witness->to_string());
     }
 
     void compute_share_polynomials(const std::vector<size_t>& indices)
     {
       if (sharings.size() != 2)
         throw std::logic_error("missing sharings");
-      auto q = sharings[0];
-      auto q_witness = sharings[1];
+
+      share_polynomials.clear();
+
+      const auto& q = sharings[0];
+      const auto& q_witness = sharings[1];
       for (auto i : indices)
       {
-        auto index_i = std::make_shared<BigNum>(i);
+        const auto index_i = std::make_shared<BigNum>(i);
         auto share_poly_i = q->y_coefficients(index_i);
         auto witness_poly_i = q_witness->y_coefficients(index_i);
+        LOG_TRACE_FMT(
+          "BYID: share_polynomials for {}: [{}, {}]",
+          i,
+          share_poly_i.to_string(),
+          witness_poly_i.to_string());
+
         share_polynomials.push_back(
           SharePolynomials({share_poly_i, witness_poly_i}));
       }
@@ -1119,22 +1259,35 @@ namespace ByzIdentity
 
     void compute_commits()
     {
-      auto q = sharings[0];
-      auto q_witness = sharings[1];
+      const auto& q = sharings[0];
+      const auto& q_witness = sharings[1];
       size_t degree_y = q->coefficients.size();
       size_t degree_x = q->coefficients[0].size();
+
       commitments_.clear();
+
+      std::stringstream ss;
+
+      ss << "[";
       for (size_t i = 0; i < degree_y; i++)
       {
-        auto qv = q->coefficients[i];
-        auto qv_witness = q_witness->coefficients[i];
+        const auto& qv = q->coefficients[i];
+        const auto& qv_witness = q_witness->coefficients[i];
+
+        ss << "[";
         std::vector<std::vector<uint8_t>> c;
         for (size_t j = 0; j < degree_x; j++)
         {
           c.push_back(compress_x_wx(qv[j], qv_witness[j], curve));
+          ss << ds::to_hex(c.back()) << ", ";
         }
+        ss << "]";
+
         commitments_.push_back(c);
       }
+      ss << "]";
+
+      LOG_TRACE_FMT("BYID: commits: {}", ss.str());
     }
   };
 
@@ -1145,7 +1298,7 @@ namespace ByzIdentity
       const std::vector<size_t>& indices,
       bool defensive = false,
       crypto::CurveID curve = crypto::CurveID::SECP384R1) :
-      ResharingDeal(indices, indices, curve)
+      ResharingDeal(indices, indices, curve, false)
     {
       sample(indices, indices);
       compute_share_polynomials(indices);
@@ -1173,6 +1326,11 @@ namespace ByzIdentity
       auto r_witness = BivariatePolynomial::sample_rss(t0, t0);
       sharings.push_back(r);
       sharings.push_back(r_witness);
+
+      LOG_TRACE_FMT(
+        "BYID: sampling deal sharings r={}, r_witness={}]",
+        r->to_string(),
+        r_witness->to_string());
     }
   };
 
@@ -1191,26 +1349,39 @@ namespace ByzIdentity
       defensive(defensive),
       curve(curve),
       config(config),
-      next_config(config)
+      next_config(config),
+      max_node_index(0)
     {
-      for (size_t i = 0; i < 3 * t + 1; i++)
+      for (auto& nid : config)
       {
-        indices.push_back(i);
-        next_indices.push_back(i);
+        indices.push_back(get_node_index(nid, false));
+        sharing_indices.push_back(get_sharing_index(nid, false));
+        max_node_index = std::max(max_node_index, indices.back());
       }
+      for (auto& nid : next_config)
+      {
+        next_indices.push_back(get_node_index(nid, true));
+      }
+
+      group_order = EC::group_order(curve);
     }
-    ~Session() {}
+
+    virtual ~Session() {}
 
     size_t id, t;
     bool defensive = false;
     std::string subprotocol;
     CurveID curve;
+    std::shared_ptr<BigNum> group_order;
 
     std::map<ccf::NodeId, std::vector<std::vector<uint8_t>>> resharings;
 
     std::vector<ccf::NodeId> config;
     std::vector<ccf::NodeId> next_config;
     std::vector<size_t> indices, next_indices;
+    std::vector<size_t> sharing_indices;
+    size_t max_node_index;
+    std::vector<EC::CompressedPoint> x_commits; // session-wide; in kv store?
 
     size_t get_node_index(const ccf::NodeId& nid, bool next = false) const
     {
@@ -1258,7 +1429,6 @@ namespace ByzIdentity
     struct NodeState
     {
       ccf::NodeId nid;
-      size_t node_index;
       std::map<
         ccf::NodeId,
         std::map<ccf::NodeId, std::shared_ptr<crypto::KeyAesGcm>>>
@@ -1271,12 +1441,12 @@ namespace ByzIdentity
       std::shared_ptr<BigNum> x_witness = BigNum::Zero(); // Public key share
 
       std::map<ccf::NodeId, std::vector<uint8_t>> decrypted_shares;
-      std::vector<std::vector<EC::CompressedPoint>>
-        batched_commits; // Different type during signing
       typedef std::vector<std::vector<uint8_t>> Reshare;
       std::map<ccf::NodeId, Reshare> reshares;
       std::vector<Blame> blames;
-      std::vector<EC::CompressedPoint> x_commits;
+      std::vector<EC::CompressedPoint> x_commits; // local - just a copy?
+      std::vector<std::vector<EC::CompressedPoint>>
+        batched_commits; // Different type during signing
 
       void encrypt_shares(
         const std::vector<ccf::NodeId>& nids,
@@ -1326,7 +1496,7 @@ namespace ByzIdentity
         }
       }
 
-      void batch_commits(const Session& s)
+      void batch_commits(SamplingSession& s)
       {
         if (decrypted_shares.size() != s.t + 1)
         {
@@ -1334,11 +1504,11 @@ namespace ByzIdentity
         }
 
         batched_commits.clear();
-        std::vector<std::vector<std::vector<EC::CompressedPoint>>> commits;
 
+        std::vector<std::vector<std::vector<EC::CompressedPoint>>> commits;
         size_t y_dim = decrypted_shares.size();
         size_t x_dim = 0;
-        for (const auto& [_, ds] : decrypted_shares)
+        for (const auto& [nid, ds] : decrypted_shares) // not in index order!
         {
           auto data = ds.data();
           auto sz = ds.size();
@@ -1362,13 +1532,24 @@ namespace ByzIdentity
             {
               assert(ci.size() > x);
               assert(ci[0].size() > y);
-              auto c = ci[y][x];
-              p.add(EC::Point(c));
+              p = p.add(EC::Point(ci[y][x]));
             }
             xt.push_back(p.compress());
           }
           batched_commits.push_back(xt);
         }
+
+        std::stringstream ss;
+        for (auto cc : batched_commits)
+        {
+          ss << "[";
+          for (auto c : cc)
+          {
+            ss << ds::to_hex(c) << ", ";
+          }
+          ss << "],";
+        }
+        LOG_TRACE_FMT("BYID: batched commits: [{}]", ss.str());
       }
 
       std::vector<std::vector<std::shared_ptr<BigNum>>> sum_polynomials(
@@ -1378,70 +1559,79 @@ namespace ByzIdentity
           throw std::logic_error("no decrypted shares/deals");
 
         std::vector<SharePolynomials> polys;
+        auto index = s.get_node_index(nid);
         for (auto& [_, ds] : decrypted_shares)
         {
           const uint8_t* data = ds.data();
           size_t sz = ds.size();
-          polys.push_back(SamplingDeal(data, sz).shares()[node_index]);
+          SamplingDeal d(data, sz);
+          auto share_i = d.shares()[index];
+          polys.push_back(share_i);
+          LOG_TRACE_FMT("BYID: {} share_i={}", nid, share_i.to_string());
+          assert(*polys.back().q.coefficients[0] != *BigNum::Zero());
         }
 
-        std::vector<std::vector<std::shared_ptr<BigNum>>> r;
-        for (size_t i = 0; i < 2; i++)
-        {
-          std::vector<std::shared_ptr<BigNum>> jt;
-          auto share_sz =
-            i == 0 ? polys[0].q.size() : polys[0].q_witness.size();
-          for (size_t j = 0; j < share_sz; j++)
-          {
-            auto sum = BigNum::Zero();
-            auto p = i == 0 ? polys[j].q : polys[j].q_witness;
-            for (auto c : p.coefficients)
-            {
-              sum->add(*c);
-            }
-            jt.push_back(sum);
-          }
-          r.push_back(jt);
-        }
-        return r;
+        return sum_share_polys(polys, s.group_order);
       }
 
       void verify_shares(
+        const Session& s,
         const std::vector<std::vector<std::shared_ptr<BigNum>>>&
-          share_polynomials,
-        const std::vector<std::vector<std::vector<uint8_t>>>& commits)
+          share_polynomials)
       {
-        size_t degree_y = commits.size();
-        size_t degree_x = commits[0].size();
+        size_t degree_y = batched_commits.size();
+        size_t degree_x = batched_commits[0].size();
         auto shares = share_polynomials[0];
         auto witnesses = share_polynomials[1];
 
+        assert(shares.size() == 2);
+
+        LOG_TRACE_FMT(
+          "shares (verification) {}: [{}, {}]",
+          nid,
+          shares[0]->to_string(),
+          shares[1]->to_string());
+
+        LOG_TRACE_FMT(
+          "witnesses (verification) {}: [{}, {}]",
+          nid,
+          witnesses[0]->to_string(),
+          witnesses[1]->to_string());
+
+        std::stringstream ss;
+        for (auto cc : batched_commits)
+        {
+          ss << "[";
+          for (auto c : cc)
+          {
+            ss << ds::to_hex(c) << ", ";
+          }
+          ss << "],";
+        }
+        LOG_TRACE_FMT("batched commits (verification) {}: [{}]", nid, ss.str());
+
+        auto index = s.get_sharing_index(nid);
         for (size_t i = 0; i < degree_y; i++)
         {
           // Recompute commitment from received shares and check that they
           // match.
-          auto commits_i = commits[i];
-          EC::Point computed = eval_in_exp(commits_i, node_index);
+          EC::Point computed =
+            EC::eval_in_exp(batched_commits[i], index, s.group_order);
+          LOG_TRACE_FMT(
+            "BYID: shares[i]={}, witnesses[i]={}",
+            shares[i]->to_string(),
+            witnesses[i]->to_string());
           auto received = compress_x_wx(shares[i], witnesses[i]);
-          if (computed.compress() != received)
+          auto compressed = computed.compress();
+          LOG_TRACE_FMT(
+            "BYID: compressed={} received={}",
+            ds::to_hex(compressed),
+            ds::to_hex(received));
+          if (compressed != received)
           {
             throw std::logic_error("shares do not correspond to commitments");
           }
         }
-      }
-
-      EC::Point eval_in_exp(
-        const std::vector<std::vector<uint8_t>>& commitment, size_t j) const
-      {
-        size_t degree = commitment.size();
-        EC::Point result(commitment[0]);
-
-        for (size_t i = 1; i < degree; i++)
-        {
-          result.add(EC::Point(commitment[i]).mul(std::pow(j, i)));
-        }
-
-        return result;
       }
 
       std::vector<std::vector<uint8_t>> compute_resharing(
@@ -1453,22 +1643,25 @@ namespace ByzIdentity
         auto share_polynomial = Polynomial(share_polynomials[0]);
         auto witness_polynomial = Polynomial(share_polynomials[1]);
         std::vector<std::vector<uint8_t>> r;
-        for (auto i : s.next_indices)
+        for (auto nid : s.next_config)
         {
+          size_t i = s.get_sharing_index(nid);
           std::vector<uint8_t> ri;
 
-          auto go = EC::group_order(s.curve);
           auto bi = std::make_shared<BigNum>(i);
 
+          auto x_eval = share_polynomial.eval(bi);
           auto xk = std::make_shared<BigNum>(
-            BigNum::mod_add(*x, *share_polynomial.eval(bi), *go));
+            BigNum::mod_add(*x, *x_eval, *s.group_order));
           std::vector<uint8_t> xks = xk->serialise();
           ri.insert(ri.end(), xks.begin(), xks.end());
+          LOG_TRACE_FMT("BYID: xk={}", xk->to_string());
 
-          auto wk = std::make_shared<BigNum>(
-            BigNum::mod_add(*x_witness, *witness_polynomial.eval(bi), *go));
+          auto wk = std::make_shared<BigNum>(BigNum::mod_add(
+            *x_witness, *witness_polynomial.eval(bi), *s.group_order));
           std::vector<uint8_t> wks = wk->serialise();
           ri.insert(ri.end(), wks.begin(), wks.end());
+          LOG_TRACE_FMT("BYID: wk={}", wk->to_string());
 
           r.push_back(ri);
         }
@@ -1476,7 +1669,7 @@ namespace ByzIdentity
       }
 
       void add_reshare(
-        const Session& s,
+        SamplingSession& s,
         const ccf::NodeId& from,
         const std::vector<std::vector<uint8_t>>& reshare)
       {
@@ -1496,66 +1689,45 @@ namespace ByzIdentity
 
         if (reshares.size() == 2 * s.t + 1)
         {
-          x_commits.clear();
+          s.x_commits.clear();
           for (size_t i = 0; i < batched_commits.size(); i++)
           {
-            x_commits.push_back(batched_commits[i][0]);
+            s.x_commits.push_back(batched_commits[i][0]);
           }
         }
       }
 
-      void verify_transfer_shares(
-        const Session& s,
-        std::vector<std::vector<EC::CompressedPoint>>& q_commits,
-        const ccf::NodeId& other,
-        std::shared_ptr<BigNum> xk,
-        std::shared_ptr<BigNum> wk) const
+      void compute_x_wx_shares(const SamplingSession& s)
       {
-        size_t j = s.get_node_index(other, true);
-        size_t k = s.get_node_index(nid, true);
-        std::vector<EC::CompressedPoint> qj_commits;
-        for (auto& q : q_commits)
-        {
-          qj_commits.push_back(eval_in_exp(q, j).compress());
-        }
-        auto commitment =
-          eval_in_exp(x_commits, j).add(eval_in_exp(qj_commits, k));
-        auto ccommitment = commitment.compress();
-        auto received = compress_x_wx(xk, wk);
-        if (ccommitment != received)
-        {
-          throw std::runtime_error("invalid commitment");
-        }
-      }
-
-      void compute_x_wx_shares(const Session& s)
-      {
-        auto go = EC::group_order(s.curve);
         std::vector<std::shared_ptr<BigNum>> shares, witnesses;
         std::vector<size_t> indices;
 
-        size_t index = node_index; // in new config
-        for (auto& [nid, reshare] : s.resharings)
+        size_t index = s.get_node_index(nid, true);
+        for (auto& [onid, reshare] : s.resharings)
         {
-          auto ri = reshare[node_index];
+          auto ri = reshare[index];
           // decrypt: NYI
 
           const uint8_t* data = ri.data();
           size_t sz = ri.size();
-          auto xk = std::make_shared<BigNum>(data, sz);
-          auto wk = std::make_shared<BigNum>(data, sz);
+          auto x_jk = std::make_shared<BigNum>(data, sz);
+          auto wx_jk = std::make_shared<BigNum>(data, sz);
 
-          verify_transfer_shares(s, batched_commits, nid, xk, wk);
-          shares.push_back(xk);
-          witnesses.push_back(wk);
-          indices.push_back(s.get_sharing_index(nid));
+          if (nid != onid)
+            s.verify_transfer_shares(
+              batched_commits, x_commits, nid, onid, x_jk, wx_jk);
+          shares.push_back(x_jk);
+          witnesses.push_back(wx_jk);
+          indices.push_back(s.get_sharing_index(onid, false));
 
           if (shares.size() > s.t)
           {
             x = std::make_shared<BigNum>(
-              BigNum::lagrange_interpolate(shares, indices, 0, *go));
-            x_witness = std::make_shared<BigNum>(
-              BigNum::lagrange_interpolate(witnesses, indices, 0, *go));
+              BigNum::lagrange_interpolate(shares, indices, 0, *s.group_order));
+            LOG_DEBUG_FMT("x={}", x->to_string());
+            assert(*x != *BigNum::Zero());
+            x_witness = std::make_shared<BigNum>(BigNum::lagrange_interpolate(
+              witnesses, indices, 0, *s.group_order));
             LOG_DEBUG_FMT("BYID: share and witness successfully interpolated");
             break;
           }
@@ -1564,5 +1736,41 @@ namespace ByzIdentity
     };
 
     std::vector<NodeState> nodes;
+
+    void verify_transfer_shares(
+      const std::vector<std::vector<EC::CompressedPoint>>& q_commits,
+      const std::vector<EC::CompressedPoint>& x_commits,
+      const ccf::NodeId& nid,
+      const ccf::NodeId& onid,
+      std::shared_ptr<BigNum> x_jk,
+      std::shared_ptr<BigNum> wx_jk) const
+    {
+      size_t j = get_sharing_index(onid, false);
+      size_t k = get_sharing_index(nid, true);
+      LOG_TRACE_FMT("j={} k={}", j, k);
+      std::vector<EC::CompressedPoint> qj_commits;
+      for (auto& q : q_commits)
+      {
+        for (size_t i = 0; i < q.size(); i++)
+        {
+          LOG_TRACE_FMT("q[{}]={}", i, ds::to_hex(q[i]));
+        }
+        auto q_eval = EC::eval_in_exp(q, j, group_order);
+        LOG_TRACE_FMT("q-eval={}", q_eval.to_compressed_hex());
+        qj_commits.push_back(q_eval.compress());
+      }
+      auto eval1 = EC::eval_in_exp(x_commits, j, group_order);
+      auto eval2 = EC::eval_in_exp(qj_commits, k, group_order);
+      LOG_TRACE_FMT("eval1={}", eval1.to_compressed_hex());
+      LOG_TRACE_FMT("eval2={}", eval2.to_compressed_hex());
+      LOG_TRACE_FMT("x_jk={} wx_jk={}", x_jk->to_string(), wx_jk->to_string());
+      auto computed = eval1.add(eval2).compress();
+      auto received = compress_x_wx(x_jk, wx_jk);
+      LOG_DEBUG_FMT("{} =?= {}", ds::to_hex(computed), ds::to_hex(received));
+      if (computed != received)
+      {
+        throw std::runtime_error("invalid commitment");
+      }
+    }
   };
 }
